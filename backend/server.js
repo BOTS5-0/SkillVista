@@ -35,6 +35,8 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || '';
 const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
+const NLP_SERVICE_URL = process.env.NLP_SERVICE_URL || 'http://127.0.0.1:8000';
+const DEFAULT_ENTITY_LABELS = ['Language', 'Framework', 'Database', 'CloudService', 'Tool', 'Concept'];
 
 // Temporary in-memory stores for OAuth state (short-lived, don't need DB)
 const pendingGithubStates = new Map();
@@ -58,6 +60,52 @@ app.use(
 );
 
 const safeString = (value) => (typeof value === 'string' ? value.trim() : '');
+const normalizeEntityText = (value) =>
+  safeString(value)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w.+# -]/g, '');
+
+const nlpClient = axios.create({
+  baseURL: NLP_SERVICE_URL,
+  timeout: 45000
+});
+
+const detectId = (row, candidates) => {
+  for (const key of candidates) {
+    if (row && row[key] != null) return row[key];
+  }
+  return null;
+};
+
+const labelToNodeType = (label) => {
+  const value = safeString(label).toLowerCase();
+  if (value === 'language' || value === 'framework') return 'skill';
+  if (value === 'database' || value === 'cloudservice' || value === 'tool') return 'technology';
+  return 'concept';
+};
+
+const resolveAlias = async (text, fallbackType) => {
+  const alias = normalizeEntityText(text);
+  if (!supabase || !alias) {
+    return { canonicalName: safeString(text), targetType: fallbackType };
+  }
+
+  const { data, error } = await supabase
+    .from('entity_aliases')
+    .select('canonical_name, target_type')
+    .eq('alias', alias)
+    .single();
+
+  if (error || !data) {
+    return { canonicalName: safeString(text), targetType: fallbackType };
+  }
+
+  return {
+    canonicalName: data.canonical_name,
+    targetType: data.target_type
+  };
+};
 
 const createAuthToken = (user) =>
   jwt.sign(
@@ -345,26 +393,26 @@ const getOrCreateSkill = async (skillName) => {
   // Try to find existing
   const { data: existing } = await supabase
     .from('skills')
-    .select('id, name')
+    .select('*')
     .eq('name', name)
     .single();
   
-  if (existing) return existing;
+  if (existing) return { ...existing, id: detectId(existing, ['skill_id', 'id']) };
   
   // Create new
   const { data: created, error } = await supabase
     .from('skills')
     .insert({ name })
-    .select('id, name')
+    .select('*')
     .single();
   
   if (error && error.code === '23505') {
     // Unique constraint - try to fetch again
-    const { data } = await supabase.from('skills').select('id, name').eq('name', name).single();
-    return data;
+    const { data } = await supabase.from('skills').select('*').eq('name', name).single();
+    return data ? { ...data, id: detectId(data, ['skill_id', 'id']) } : null;
   }
   
-  return created;
+  return created ? { ...created, id: detectId(created, ['skill_id', 'id']) } : null;
 };
 
 // Helper to get or create a source (github, notion, certification, manual, other)
@@ -403,24 +451,66 @@ const getOrCreateTechnology = async (techName) => {
   
   const { data: existing } = await supabase
     .from('technologies')
-    .select('id, name')
+    .select('*')
     .eq('name', name)
     .single();
   
-  if (existing) return existing;
+  if (existing) return { ...existing, id: detectId(existing, ['id', 'technology_id']) };
   
   const { data: created, error } = await supabase
     .from('technologies')
     .insert({ name })
-    .select('id, name')
+    .select('*')
     .single();
   
   if (error && error.code === '23505') {
-    const { data } = await supabase.from('technologies').select('id, name').eq('name', name).single();
-    return data;
+    const { data } = await supabase.from('technologies').select('*').eq('name', name).single();
+    return data ? { ...data, id: detectId(data, ['id', 'technology_id']) } : null;
   }
   
-  return created;
+  return created ? { ...created, id: detectId(created, ['id', 'technology_id']) } : null;
+};
+
+const getOrCreateConcept = async (conceptName) => {
+  if (!supabase || !conceptName) return null;
+
+  const name = conceptName.toLowerCase().trim();
+  const { data: existing } = await supabase
+    .from('concepts')
+    .select('*')
+    .eq('name', name)
+    .single();
+
+  if (existing) return { ...existing, id: detectId(existing, ['id', 'concept_id']) };
+
+  const { data: created, error } = await supabase
+    .from('concepts')
+    .insert({ name })
+    .select('*')
+    .single();
+
+  if (error && error.code === '23505') {
+    const { data } = await supabase.from('concepts').select('*').eq('name', name).single();
+    return data ? { ...data, id: detectId(data, ['id', 'concept_id']) } : null;
+  }
+
+  return created ? { ...created, id: detectId(created, ['id', 'concept_id']) } : null;
+};
+
+const upsertEmbeddingByType = async (targetType, id, embedding) => {
+  if (!supabase || !id || !Array.isArray(embedding) || !embedding.length) return;
+  const table = targetType === 'skill' ? 'skills' : targetType === 'technology' ? 'technologies' : 'concepts';
+  const idColumn = targetType === 'skill' ? 'skill_id' : 'id';
+  await supabase
+    .from(table)
+    .update({ embedding_384: embedding })
+    .eq(idColumn, id);
+};
+
+const getOrCreateNodeByType = async (targetType, name) => {
+  if (targetType === 'skill') return getOrCreateSkill(name);
+  if (targetType === 'technology') return getOrCreateTechnology(name);
+  return getOrCreateConcept(name);
 };
 
 // Helper to create or update a project from external source
@@ -556,12 +646,12 @@ const updateStudentSkills = async (studentId, inferredSkills, repoDetailsMap, re
     const volumeScore = Math.min(Math.log10(totalBytes + 1) * 5, 30); // Max 30 from volume
     const qualityScore = Math.min((totalStars * 2) + (totalCommits * 0.5), 30); // Max 30 from quality
     
-    const proficiencyScore = Math.min(Math.round(usageScore + volumeScore + qualityScore), 100);
+    const proficiencyScore = Math.min((usageScore + volumeScore + qualityScore) / 100, 1);
     
     // Calculate confidence score (0-100)
     // Higher confidence with more data points
     const dataPoints = repoCount + totalCommits;
-    const confidenceScore = Math.min(Math.round(dataPoints * 5), 100);
+    const confidenceScore = Math.min((dataPoints * 5) / 100, 1);
     
     skillMetrics.set(skill.id, {
       skillId: skill.id,
@@ -1666,6 +1756,246 @@ const runGithubSync = async ({ token, limit, includePrivate, studentId }) => {
   }
 };
 
+const fetchEntitiesFromNlp = async (text, labels = DEFAULT_ENTITY_LABELS) => {
+  const { data } = await nlpClient.post('/extract/entities', { text, labels });
+  return Array.isArray(data?.entities) ? data.entities : [];
+};
+
+const fetchEmbeddingFromNlp = async (text) => {
+  const { data } = await nlpClient.post('/embed', { text });
+  return Array.isArray(data?.embedding) ? data.embedding : [];
+};
+
+const createCooccurrenceEdges = async (nodes) => {
+  if (!supabase || nodes.length < 2) return;
+
+  for (let i = 0; i < nodes.length; i += 1) {
+    const a = nodes[i];
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const b = nodes[j];
+      if (!a?.id || !b?.id || !a?.targetType || !b?.targetType) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('knowledge_edges').insert({
+        source_id: a.id,
+        target_id: b.id,
+        source_type: a.targetType,
+        target_type: b.targetType,
+        relation_type: 'RELATED_TO',
+        weight: 1
+      });
+    }
+  }
+};
+
+const runIntelligencePipeline = async ({
+  studentId,
+  provider = 'manual',
+  sourceTable = 'notion_pages',
+  sourcePk = 'manual',
+  sourceText,
+  projectId = null
+}) => {
+  if (!supabase) throw new Error('Supabase is not configured.');
+  if (!sourceText || !safeString(sourceText)) throw new Error('sourceText is required.');
+
+  const { data: runRow, error: runInsertError } = await supabase
+    .from('intelligence_runs')
+    .insert({
+      student_id: studentId,
+      provider,
+      status: 'running',
+      started_at: new Date().toISOString()
+    })
+    .select('id')
+    .single();
+
+  if (runInsertError) {
+    throw new Error(`Failed to create intelligence run: ${runInsertError.message}`);
+  }
+
+  const runId = runRow.id;
+
+  try {
+    const entities = await fetchEntitiesFromNlp(sourceText);
+    const linkedNodes = [];
+    let processed = 0;
+
+    for (const entity of entities) {
+      const extractedText = safeString(entity?.text);
+      if (!extractedText) continue;
+
+      const initialType = labelToNodeType(entity?.label);
+      // eslint-disable-next-line no-await-in-loop
+      const alias = await resolveAlias(extractedText, initialType);
+      const canonicalName = safeString(alias.canonicalName || extractedText);
+      const targetType = alias.targetType || initialType;
+
+      // eslint-disable-next-line no-await-in-loop
+      const node = await getOrCreateNodeByType(targetType, canonicalName);
+      if (!node || !node.id) continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const embedding = await fetchEmbeddingFromNlp(canonicalName);
+      // eslint-disable-next-line no-await-in-loop
+      await upsertEmbeddingByType(targetType, node.id, embedding);
+
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('entity_mentions').insert({
+        student_id: studentId,
+        project_id: projectId,
+        source_table: sourceTable,
+        source_pk: String(sourcePk),
+        source_text: sourceText,
+        extracted_text: extractedText,
+        normalized_text: canonicalName,
+        target_type: targetType,
+        target_id: node.id,
+        label: safeString(entity?.label) || null,
+        extraction_confidence: entity?.score ?? null,
+        metadata: {
+          start: entity?.start ?? null,
+          end: entity?.end ?? null,
+          run_id: runId
+        }
+      });
+
+      if (targetType === 'skill') {
+        // eslint-disable-next-line no-await-in-loop
+        await supabase.from('student_skill_evidence').insert({
+          student_id: studentId,
+          skill_id: node.id,
+          evidence_type: provider === 'github' ? 'github_repo' : provider === 'certification' ? 'certification' : 'notion_page',
+          evidence_ref: String(sourcePk),
+          weight: Number(entity?.score ?? 0.75),
+          metadata: {
+            source_table: sourceTable,
+            label: safeString(entity?.label)
+          }
+        });
+      }
+
+      if (projectId) {
+        if (targetType === 'skill') {
+          // eslint-disable-next-line no-await-in-loop
+          await linkProjectSkill(projectId, node.id, 1);
+        } else if (targetType === 'technology') {
+          // eslint-disable-next-line no-await-in-loop
+          await linkProjectTechnology(projectId, node.id);
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await supabase.from('project_concepts').upsert(
+            { project_id: projectId, concept_id: node.id },
+            { onConflict: 'project_id,concept_id' }
+          );
+        }
+      }
+
+      linkedNodes.push({ id: node.id, targetType });
+      processed += 1;
+    }
+
+    await createCooccurrenceEdges(linkedNodes);
+    await supabase.rpc('recompute_student_skill_scores', { input_student_id: studentId });
+    await supabase
+      .from('intelligence_runs')
+      .update({
+        status: 'success',
+        finished_at: new Date().toISOString(),
+        stats: { processed_entities: processed }
+      })
+      .eq('id', runId);
+
+    return { runId, processed };
+  } catch (error) {
+    await supabase
+      .from('intelligence_runs')
+      .update({
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: error.message || 'Intelligence pipeline failed'
+      })
+      .eq('id', runId);
+    throw error;
+  }
+};
+
+const enqueueSyncJob = async ({ studentId, provider, payload }) => {
+  const { data, error } = await supabase
+    .from('sync_queue')
+    .insert({
+      student_id: studentId,
+      provider,
+      payload: payload || {},
+      status: 'queued'
+    })
+    .select('*')
+    .single();
+  if (error) throw new Error(`Failed to enqueue job: ${error.message}`);
+  return data;
+};
+
+const runQueueWorkerOnce = async () => {
+  if (!supabase) throw new Error('Supabase is not configured.');
+
+  const { data: queuedJobs, error: queuedError } = await supabase
+    .from('sync_queue')
+    .select('*')
+    .eq('status', 'queued')
+    .lte('next_run_at', new Date().toISOString())
+    .order('next_run_at', { ascending: true })
+    .limit(1);
+
+  if (queuedError) throw new Error(`Failed to poll queue: ${queuedError.message}`);
+  if (!queuedJobs || !queuedJobs.length) return { processed: false, reason: 'no queued jobs' };
+
+  const job = queuedJobs[0];
+  const attempts = Number(job.attempts || 0) + 1;
+
+  await supabase
+    .from('sync_queue')
+    .update({ status: 'running', attempts, locked_at: new Date().toISOString() })
+    .eq('id', job.id);
+
+  try {
+    const payload = job.payload || {};
+    const sourceText =
+      payload.sourceText || [payload.title, payload.description, payload.readme, payload.tags].filter(Boolean).join('\n');
+
+    await runIntelligencePipeline({
+      studentId: job.student_id,
+      provider: job.provider,
+      sourceTable: payload.sourceTable || (job.provider === 'github' ? 'github_repos' : 'notion_pages'),
+      sourcePk: String(payload.sourcePk || payload.repoId || payload.pageId || job.id),
+      sourceText,
+      projectId: payload.projectId || null
+    });
+
+    await supabase
+      .from('sync_queue')
+      .update({ status: 'success', last_error: null })
+      .eq('id', job.id);
+
+    return { processed: true, jobId: job.id, status: 'success' };
+  } catch (error) {
+    const maxAttempts = Number(job.max_attempts || 5);
+    const exhausted = attempts >= maxAttempts;
+    await supabase
+      .from('sync_queue')
+      .update({
+        status: exhausted ? 'dead' : 'failed',
+        last_error: error.message || 'Queue worker failed',
+        next_run_at: exhausted ? job.next_run_at : new Date(Date.now() + 5 * 60 * 1000).toISOString()
+      })
+      .eq('id', job.id);
+    return {
+      processed: true,
+      jobId: job.id,
+      status: exhausted ? 'dead' : 'failed',
+      error: error.message || 'Queue worker failed'
+    };
+  }
+};
+
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
   const token = await getGithubTokenForUser(req.user.id);
   if (!token) {
@@ -1732,12 +2062,248 @@ app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) =
   }
 });
 
-app.post(`${API_PREFIX}/integrations/notion/sync`, authGuard, (req, res) => {
-  res.status(501).json({ message: 'Notion sync not implemented in this file yet' });
+app.post(`${API_PREFIX}/intelligence/extract`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured.' });
+    }
+
+    const studentId = Number(req.body?.studentId);
+    const provider = safeString(req.body?.provider) || 'manual';
+    const sourceTable = safeString(req.body?.sourceTable) || 'notion_pages';
+    const sourcePk = safeString(req.body?.sourcePk) || crypto.randomUUID();
+    const sourceText = safeString(req.body?.sourceText);
+    const projectIdRaw = req.body?.projectId;
+    const projectId = projectIdRaw == null ? null : Number(projectIdRaw);
+
+    if (!studentId || !sourceText) {
+      return res.status(400).json({ error: 'studentId and sourceText are required.' });
+    }
+
+    const result = await runIntelligencePipeline({
+      studentId,
+      provider,
+      sourceTable,
+      sourcePk,
+      sourceText,
+      projectId
+    });
+
+    return res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    return res.status(502).json({
+      error: 'Intelligence extraction failed',
+      details: error.message
+    });
+  }
 });
 
-app.post(`${API_PREFIX}/integrations/certifications/sync`, authGuard, (req, res) => {
-  res.status(501).json({ message: 'Certification sync not implemented in this file yet' });
+app.post(`${API_PREFIX}/sync/queue`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured.' });
+    }
+
+    const studentId = Number(req.body?.studentId);
+    const provider = safeString(req.body?.provider);
+    const payload = req.body?.payload || {};
+
+    if (!studentId || !provider) {
+      return res.status(400).json({ error: 'studentId and provider are required.' });
+    }
+
+    const job = await enqueueSyncJob({ studentId, provider, payload });
+    return res.status(201).json({ queued: true, job });
+  } catch (error) {
+    return res.status(502).json({ error: 'Failed to enqueue sync job', details: error.message });
+  }
+});
+
+app.post(`${API_PREFIX}/sync/worker/run-once`, authGuard, async (req, res) => {
+  try {
+    const result = await runQueueWorkerOnce();
+    return res.json(result);
+  } catch (error) {
+    return res.status(502).json({ error: 'Sync worker execution failed', details: error.message });
+  }
+});
+
+app.post(`${API_PREFIX}/search/semantic`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured.' });
+    }
+    const text = safeString(req.body?.text);
+    const matchThreshold = Number(req.body?.threshold ?? 0.55);
+    const matchCount = Number(req.body?.count ?? 20);
+    if (!text) return res.status(400).json({ error: 'text is required' });
+
+    const embedding = await fetchEmbeddingFromNlp(text);
+    const { data, error } = await supabase.rpc('match_knowledge_nodes', {
+      query_embedding: embedding,
+      match_threshold: matchThreshold,
+      match_count: matchCount
+    });
+
+    if (error) throw new Error(error.message);
+    return res.json({ query: text, results: data || [] });
+  } catch (error) {
+    return res.status(502).json({ error: 'Semantic search failed', details: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/students/:studentId/skills`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Supabase is not configured.' });
+    const studentId = Number(req.params.studentId);
+    if (!studentId) return res.status(400).json({ error: 'Invalid studentId' });
+
+    const { data, error } = await supabase
+      .from('student_skills')
+      .select('student_id, skill_id, proficiency_score, confidence_score, usage_count, last_used, skills(*)')
+      .eq('student_id', studentId)
+      .order('proficiency_score', { ascending: false });
+
+    if (error) throw new Error(error.message);
+    return res.json({ studentId, skills: data || [] });
+  } catch (error) {
+    return res.status(502).json({ error: 'Failed to fetch student skills', details: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/students/:studentId/graph`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Supabase is not configured.' });
+    const studentId = Number(req.params.studentId);
+    const depth = Number(req.query.depth || 2);
+    if (!studentId) return res.status(400).json({ error: 'Invalid studentId' });
+
+    const { data: seedSkills, error: skillError } = await supabase
+      .from('student_skills')
+      .select('skill_id, skills(name)')
+      .eq('student_id', studentId)
+      .order('proficiency_score', { ascending: false })
+      .limit(10);
+
+    if (skillError) throw new Error(skillError.message);
+
+    const edges = [];
+    for (const skill of seedSkills || []) {
+      // eslint-disable-next-line no-await-in-loop
+      const { data: traversal, error } = await supabase.rpc('get_related_nodes', {
+        input_source_id: skill.skill_id,
+        input_source_type: 'skill',
+        max_depth: depth,
+        max_rows: 200
+      });
+      if (error) throw new Error(error.message);
+      edges.push(...(traversal || []));
+    }
+
+    return res.json({ studentId, depth, seedSkills: seedSkills || [], edges });
+  } catch (error) {
+    return res.status(502).json({ error: 'Failed to fetch graph', details: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/students/:studentId/recommendations`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Supabase is not configured.' });
+    const studentId = Number(req.params.studentId);
+    if (!studentId) return res.status(400).json({ error: 'Invalid studentId' });
+
+    const { data: weakSkills, error: weakError } = await supabase
+      .from('student_skills')
+      .select('skill_id, proficiency_score, confidence_score, skills(name)')
+      .eq('student_id', studentId)
+      .order('proficiency_score', { ascending: true })
+      .limit(5);
+
+    if (weakError) throw new Error(weakError.message);
+    const weakSkillIds = (weakSkills || []).map((item) => item.skill_id);
+
+    let conceptSuggestions = [];
+    if (weakSkillIds.length) {
+      const { data, error } = await supabase
+        .from('knowledge_edges')
+        .select('target_id, target_type, relation_type, weight')
+        .eq('source_type', 'skill')
+        .in('source_id', weakSkillIds)
+        .in('relation_type', ['DEPENDS_ON', 'RELATED_TO'])
+        .limit(50);
+
+      if (error) throw new Error(error.message);
+      const conceptIds = [...new Set((data || []).filter((row) => row.target_type === 'concept').map((row) => row.target_id))];
+      if (conceptIds.length) {
+        const conceptsResult = await supabase.from('concepts').select('id, name').in('id', conceptIds).limit(10);
+        if (conceptsResult.error) throw new Error(conceptsResult.error.message);
+        conceptSuggestions = conceptsResult.data || [];
+      }
+    }
+
+    return res.json({
+      studentId,
+      skillGaps: weakSkills || [],
+      suggestedConcepts: conceptSuggestions
+    });
+  } catch (error) {
+    return res.status(502).json({ error: 'Failed to build recommendations', details: error.message });
+  }
+});
+
+app.post(`${API_PREFIX}/integrations/notion/sync`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Supabase is not configured.' });
+    const studentId = Number(req.body?.studentId);
+    const sourceText = safeString(req.body?.sourceText || req.body?.content);
+    if (!studentId || !sourceText) {
+      return res.status(400).json({ error: 'studentId and sourceText/content are required.' });
+    }
+
+    const job = await enqueueSyncJob({
+      studentId,
+      provider: 'notion',
+      payload: {
+        sourceTable: 'notion_pages',
+        sourcePk: safeString(req.body?.sourcePk) || crypto.randomUUID(),
+        sourceText,
+        tags: req.body?.tags || null
+      }
+    });
+
+    return res.status(202).json({ queued: true, provider: 'notion', job });
+  } catch (error) {
+    return res.status(502).json({ error: 'Notion sync enqueue failed', details: error.message });
+  }
+});
+
+app.post(`${API_PREFIX}/integrations/certifications/sync`, authGuard, async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Supabase is not configured.' });
+    const studentId = Number(req.body?.studentId);
+    const sourceText = safeString(req.body?.sourceText || `${req.body?.name || ''} ${req.body?.issuer || ''}`);
+    if (!studentId || !sourceText) {
+      return res.status(400).json({ error: 'studentId and sourceText/name+issuer are required.' });
+    }
+
+    const job = await enqueueSyncJob({
+      studentId,
+      provider: 'certification',
+      payload: {
+        sourceTable: 'certifications',
+        sourcePk: safeString(req.body?.sourcePk) || crypto.randomUUID(),
+        sourceText,
+        metadata: req.body?.metadata || {}
+      }
+    });
+
+    return res.status(202).json({ queued: true, provider: 'certification', job });
+  } catch (error) {
+    return res.status(502).json({ error: 'Certification sync enqueue failed', details: error.message });
+  }
 });
 
 app.use((req, res) => {

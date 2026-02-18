@@ -86,8 +86,11 @@ class SkillVistaAPI {
       if (!response.ok) {
         try {
           const error = JSON.parse(text);
-          throw new Error(error.error || `API error: ${response.status}`);
+          const err: any = new Error(error.error || `API error: ${response.status}`);
+          err.needsOAuth = error.needsOAuth;
+          throw err;
         } catch (parseError) {
+          if ((parseError as Error).message.includes('needsOAuth')) throw parseError;
           throw new Error(`Server error (${response.status}): ${text || 'No response body'}`);
         }
       }

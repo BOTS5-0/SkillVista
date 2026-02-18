@@ -158,30 +158,41 @@ const toRepoSummary = (repo, languageMap, commitCount) => ({
   pushedAt: repo.pushed_at
 });
 
-const getGithubTokenForUser = async (userId) => {
+const getGithubTokenForUser = async (userId, allowStaticFallback = true) => {
   // First try Supabase if configured
   if (supabase) {
+    let studentId = null;
+    
+    // Try to get student from memory cache first
     const user = usersById.get(userId);
     if (user?.email) {
-      // Find student by email
       const { data: student } = await supabase
         .from('students')
         .select('id')
         .eq('email', user.email)
         .single();
+      if (student) studentId = student.id;
+    }
+    
+    // If not in memory, try looking up by ID directly
+    if (!studentId) {
+      const numericId = parseInt(userId, 10);
+      if (!isNaN(numericId)) {
+        studentId = numericId;
+      }
+    }
+    
+    if (studentId) {
+      // Get GitHub token from integration_accounts
+      const { data: integration } = await supabase
+        .from('integration_accounts')
+        .select('access_token')
+        .eq('student_id', studentId)
+        .eq('provider', 'github')
+        .single();
       
-      if (student) {
-        // Get GitHub token from integration_accounts
-        const { data: integration } = await supabase
-          .from('integration_accounts')
-          .select('access_token')
-          .eq('student_id', student.id)
-          .eq('provider', 'github')
-          .single();
-        
-        if (integration?.access_token) {
-          return integration.access_token;
-        }
+      if (integration?.access_token) {
+        return integration.access_token;
       }
     }
   }
@@ -189,7 +200,9 @@ const getGithubTokenForUser = async (userId) => {
   // Fallback to in-memory storage
   const oauthToken = githubTokensByUserId.get(userId);
   if (oauthToken && oauthToken.accessToken) return oauthToken.accessToken;
-  if (GITHUB_STATIC_TOKEN) return GITHUB_STATIC_TOKEN;
+  
+  // Only use static token if explicitly allowed (for /sync endpoint, not /oauth/sync)
+  if (allowStaticFallback && GITHUB_STATIC_TOKEN) return GITHUB_STATIC_TOKEN;
   return '';
 };
 
@@ -200,42 +213,48 @@ const saveGithubToken = async (userId, tokenData, githubUser) => {
   
   if (!supabase) return;
   
-  const user = usersById.get(userId);
-  if (!user?.email) return;
-  
   try {
-    // Find or create student
-    let { data: student } = await supabase
-      .from('students')
-      .select('id')
-      .eq('email', user.email)
-      .single();
+    let studentId = null;
     
-    if (!student) {
-      // Create student record
-      const { data: newStudent, error } = await supabase
+    // First try to get student from memory cache
+    const user = usersById.get(userId);
+    if (user?.email) {
+      const { data: student } = await supabase
         .from('students')
-        .insert({ name: user.name, email: user.email })
         .select('id')
+        .eq('email', user.email)
         .single();
-      
-      if (error) {
-        console.error('Failed to create student:', error);
-        return;
+      if (student) studentId = student.id;
+    }
+    
+    // If not in memory, try looking up by ID directly (userId might be the student ID)
+    if (!studentId) {
+      const numericId = parseInt(userId, 10);
+      if (!isNaN(numericId)) {
+        const { data: student } = await supabase
+          .from('students')
+          .select('id')
+          .eq('id', numericId)
+          .single();
+        if (student) studentId = student.id;
       }
-      student = newStudent;
+    }
+    
+    if (!studentId) {
+      console.error('Could not find student for userId:', userId);
+      return;
     }
     
     // Check if integration account already exists
     const { data: existing } = await supabase
       .from('integration_accounts')
       .select('id')
-      .eq('student_id', student.id)
+      .eq('student_id', studentId)
       .eq('provider', 'github')
       .single();
     
     const integrationData = {
-      student_id: student.id,
+      student_id: studentId,
       provider: 'github',
       external_user_id: String(githubUser?.id || ''),
       external_username: githubUser?.login || '',
@@ -264,7 +283,7 @@ const saveGithubToken = async (userId, tokenData, githubUser) => {
     if (saveError) {
       console.error('Failed to save GitHub token:', saveError);
     } else {
-      console.log(`GitHub token saved for student ${student.id}`);
+      console.log(`GitHub token saved for student ${studentId}`);
     }
   } catch (err) {
     console.error('Error saving GitHub token to Supabase:', err);
@@ -733,10 +752,12 @@ const runGithubSync = async ({ token, limit, includePrivate }) => {
 };
 
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
-  const token = await getGithubTokenForUser(req.user.id);
+  // Don't allow static token fallback - must have OAuth token
+  const token = await getGithubTokenForUser(req.user.id, false);
   if (!token) {
     return res.status(400).json({
-      error: 'No GitHub token found. Connect OAuth first or set GITHUB_TOKEN in .env'
+      error: 'No GitHub OAuth token found. Please connect your GitHub account first.',
+      needsOAuth: true
     });
   }
 

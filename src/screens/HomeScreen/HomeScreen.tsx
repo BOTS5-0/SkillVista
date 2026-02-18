@@ -49,16 +49,36 @@ export const HomeScreen: React.FC = () => {
       // Step 2: Open GitHub authorization page in browser
       const result = await WebBrowser.openBrowserAsync(authUrl);
       
-      // Step 3: After user returns from browser, fetch their GitHub data
+      // Step 3: After user returns from browser, wait for callback to complete
       if (result.type === 'cancel') {
-        // User cancelled, but they might have already authorized
-        // Try to sync anyway
+        setIsLoading(false);
+        return; // User cancelled
       }
       
-      // Step 4: Sync GitHub repos using the OAuth token stored on server
-      const data = await api.syncGitHubReposOAuth();
-      setGithubData(data);
-      Alert.alert('Success', 'GitHub profile synced successfully!');
+      // Step 4: Wait a moment for the OAuth callback to complete on the server
+      // The callback saves the token to the database
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Step 5: Try to sync with retries (callback might still be processing)
+      let lastError: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const data = await api.syncGitHubReposOAuth();
+          setGithubData(data);
+          Alert.alert('Success', 'GitHub profile synced successfully!');
+          return;
+        } catch (err: any) {
+          lastError = err;
+          if (err.needsOAuth) {
+            // Token not saved yet, wait and retry
+            await new Promise(resolve => setTimeout(resolve, 1500));
+          } else {
+            throw err;
+          }
+        }
+      }
+      
+      throw lastError || new Error('Failed to sync after multiple attempts');
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to connect GitHub');
     } finally {

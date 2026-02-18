@@ -1060,6 +1060,7 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
+    const authUserId = crypto.randomUUID(); // Generate unique UUID for user
 
     // Insert new student into Supabase
     const { data: newStudent, error } = await supabase
@@ -1067,9 +1068,10 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
       .insert({
         name,
         email,
-        password_hash: passwordHash
+        password_hash: passwordHash,
+        auth_user_id: authUserId
       })
-      .select('id, name, email')
+      .select('id, name, email, auth_user_id')
       .single();
 
     if (error) {
@@ -1103,7 +1105,7 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
     // Fetch student from Supabase by email
     const { data: student, error } = await supabase
       .from('students')
-      .select('id, name, email, password_hash')
+      .select('id, name, email, password_hash, auth_user_id')
       .eq('email', email)
       .single();
 
@@ -1116,8 +1118,18 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // If user doesn't have auth_user_id, generate one now (for existing users)
+    let authUserId = student.auth_user_id;
+    if (!authUserId) {
+      authUserId = crypto.randomUUID();
+      await supabase
+        .from('students')
+        .update({ auth_user_id: authUserId })
+        .eq('id', student.id);
+    }
+
     const token = createAuthToken(student);
-    return res.json({ token, user: { id: student.id, name: student.name, email: student.email } });
+    return res.json({ token, user: { id: student.id, name: student.name, email: student.email, auth_user_id: authUserId } });
   } catch (err) {
     console.error('Login error:', err);
     return res.status(500).json({ error: 'Internal server error' });

@@ -6,9 +6,13 @@ import { LoginCredentials } from '@/types/auth';
 
 interface RegistrationScreenProps {
   onNavigateBack?: () => void;
+  onRegistrationSuccess?: () => void;
 }
 
-export const LoginScreen: React.FC<RegistrationScreenProps> = ({ onNavigateBack }) => {
+export const LoginScreen: React.FC<RegistrationScreenProps> = ({
+  onNavigateBack,
+  onRegistrationSuccess,
+}) => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleLogin = async (credentials: LoginCredentials) => {
@@ -24,16 +28,12 @@ export const LoginScreen: React.FC<RegistrationScreenProps> = ({ onNavigateBack 
       // Simulate API delay
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
-      // Show success message
-      Alert.alert('Success', 'Account created successfully!', [
-        {
-          text: 'OK',
-          onPress: () => {
-            // TODO: Navigate to next screen or dashboard
-            console.log('User logged in, navigate to dashboard');
-          },
-        },
-      ]);
+      if (onRegistrationSuccess) {
+        onRegistrationSuccess();
+        return;
+      }
+
+      console.log('User logged in, navigate to dashboard');
     } catch (error) {
       Alert.alert(
         'Error',

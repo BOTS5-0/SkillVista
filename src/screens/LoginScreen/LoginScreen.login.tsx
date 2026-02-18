@@ -7,11 +7,13 @@ import { LoginCredentials } from '@/utils/loginValidators';
 interface LoginScreenProps {
   onNavigateToForgotPassword?: () => void;
   onNavigateToSignUp?: () => void;
+  onLoginSuccess?: () => void;
 }
 
 export const LoginScreenComponent: React.FC<LoginScreenProps> = ({
   onNavigateToForgotPassword,
   onNavigateToSignUp,
+  onLoginSuccess,
 }) => {
   const [isLoading, setIsLoading] = useState(false);
 
@@ -26,16 +28,12 @@ export const LoginScreenComponent: React.FC<LoginScreenProps> = ({
       // Simulate API delay
       await new Promise((resolve) => setTimeout(resolve, 1500));
 
-      // Show success message
-      Alert.alert('Success', 'Logged in successfully!', [
-        {
-          text: 'OK',
-          onPress: () => {
-            // TODO: Navigate to dashboard/home screen
-            console.log('User logged in, navigate to dashboard');
-          },
-        },
-      ]);
+      if (onLoginSuccess) {
+        onLoginSuccess();
+        return;
+      }
+
+      console.log('User logged in, navigate to dashboard');
     } catch (error) {
       Alert.alert(
         'Error',

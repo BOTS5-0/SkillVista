@@ -2,31 +2,26 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Redirect } from 'expo-router';
-import { HomeScreen } from '@/screens/HomeScreen/HomeScreen';
-import { ForgotPasswordScreen } from '@/screens/ForgotPasswordScreen';
-import { LoginScreenComponent } from '@/screens/LoginScreen/LoginScreen.login';
-import { LoginScreen as RegistrationScreen } from '@/screens/LoginScreen/LoginScreen';
-
-type AuthScreen = 'login' | 'register' | 'home' | 'forgot';
+import { GitHubLoginScreen } from '@/screens/GitHubLoginScreen';
 
 const AUTH_STORAGE_KEY = 'skillvista.auth.session';
 
 export default function Index() {
-  const [currentScreen, setCurrentScreen] = useState<AuthScreen>('login');
   const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   useEffect(() => {
     const bootstrapAuth = async () => {
       try {
         const storedSession = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
         if (storedSession === 'true') {
-          setCurrentScreen('home');
+          setIsAuthenticated(true);
           return;
         }
-        setCurrentScreen('login');
+        setIsAuthenticated(false);
       } catch (error) {
         console.warn('Failed to load auth session', error);
-        setCurrentScreen('login');
+        setIsAuthenticated(false);
       } finally {
         setIsBootstrapping(false);
       }
@@ -34,23 +29,6 @@ export default function Index() {
 
     bootstrapAuth();
   }, []);
-
-  const handleNavigateToSignUp = () => {
-    setCurrentScreen('register');
-  };
-
-  const handleNavigateToLogin = () => {
-    setCurrentScreen('login');
-  };
-
-  const handleNavigateToForgotPassword = () => {
-    setCurrentScreen('forgot');
-  };
-
-  const handleLoginSuccess = async () => {
-    await AsyncStorage.setItem(AUTH_STORAGE_KEY, 'true');
-    setCurrentScreen('home');
-  };
 
   if (isBootstrapping) {
     return (
@@ -60,28 +38,9 @@ export default function Index() {
     );
   }
 
-  if (currentScreen === 'register') {
-    return (
-      <RegistrationScreen 
-        onNavigateBack={handleNavigateToLogin}
-        onRegistrationSuccess={handleLoginSuccess}
-      />
-    );
-  }
-
-  if (currentScreen === 'home') {
+  if (isAuthenticated) {
     return <Redirect href="/(tabs)/dashboard" />;
   }
 
-  if (currentScreen === 'forgot') {
-    return <ForgotPasswordScreen onNavigateBack={handleNavigateToLogin} />;
-  }
-
-  return (
-    <LoginScreenComponent 
-      onNavigateToSignUp={handleNavigateToSignUp}
-      onNavigateToForgotPassword={handleNavigateToForgotPassword}
-      onLoginSuccess={handleLoginSuccess}
-    />
-  );
+  return <GitHubLoginScreen />;
 }

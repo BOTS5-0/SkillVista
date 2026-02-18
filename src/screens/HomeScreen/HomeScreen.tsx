@@ -4,76 +4,69 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  Modal,
+  Image,
   Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { mockProfile } from '@/data/mockData';
 
 export const HomeScreen: React.FC = () => {
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const router = useRouter();
 
-  const handleOpenDrawer = () => {
-    setIsDrawerOpen(true);
-  };
-
-  const handleCloseDrawer = () => {
-    setIsDrawerOpen(false);
-  };
-
   const handleOpenProfile = () => {
-    setIsDrawerOpen(false);
+    setIsMenuOpen(false);
     router.push('/profile');
   };
 
   const handleOpenSettings = () => {
-    setIsDrawerOpen(false);
+    setIsMenuOpen(false);
     router.push('/settings');
+  };
+
+  const handleToggleMenu = () => {
+    setIsMenuOpen((prev) => !prev);
   };
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
       <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.headerIconButton}
-          onPress={handleOpenDrawer}
-          accessibilityLabel="Open profile and settings"
-        >
-          <Ionicons name="menu" size={22} color="#0F172A" />
-        </TouchableOpacity>
+        <View style={styles.headerSpacer} />
         <View style={styles.headerTitleContainer}>
           <Text style={styles.headerTitle}>Dashboard</Text>
         </View>
-        <View style={styles.headerSpacer} />
+        <TouchableOpacity
+          style={styles.avatarButton}
+          onPress={handleToggleMenu}
+          accessibilityLabel="Open profile menu"
+        >
+          <Image source={{ uri: mockProfile.avatarUrl }} style={styles.avatar} />
+        </TouchableOpacity>
       </View>
+      {isMenuOpen && (
+        <View style={styles.menuOverlay}>
+          <Pressable style={styles.menuBackdrop} onPress={handleToggleMenu} />
+          <View style={styles.profileMenu}>
+            <TouchableOpacity style={styles.menuItem} onPress={handleOpenProfile}>
+              <Ionicons name="person-circle-outline" size={18} color="#1E293B" />
+              <Text style={styles.menuItemText}>Profile</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.menuItem} onPress={handleOpenSettings}>
+              <Ionicons name="settings-outline" size={18} color="#1E293B" />
+              <Text style={styles.menuItemText}>Settings</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
       <View style={styles.content}>
         <Text style={styles.title}>Welcome</Text>
         <Text style={styles.subtitle}>You are logged in.</Text>
       </View>
 
-      <Modal transparent visible={isDrawerOpen} animationType="fade">
-        <View style={styles.drawerOverlay}>
-          <View style={styles.drawer}>
-            <Text style={styles.drawerTitle}>Menu</Text>
-            <TouchableOpacity style={styles.drawerItem} onPress={handleOpenProfile}>
-              <Ionicons name="person-circle-outline" size={18} color="#1E293B" />
-              <Text style={styles.drawerItemText}>Profile</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.drawerItem} onPress={handleOpenSettings}>
-              <Ionicons name="settings-outline" size={18} color="#1E293B" />
-              <Text style={styles.drawerItemText}>Settings</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.drawerClose} onPress={handleCloseDrawer}>
-              <Text style={styles.drawerCloseText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-          <Pressable style={styles.drawerBackdrop} onPress={handleCloseDrawer} />
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 };
@@ -84,13 +77,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#f5f5f5',
   },
   header: {
-    height: 52,
+    height: 72,
     paddingHorizontal: 16,
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
     borderBottomColor: '#E2E8F0',
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerSpacer: {
+    width: 52,
+    height: 52,
   },
   headerTitleContainer: {
     flex: 1,
@@ -101,17 +99,61 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#0F172A',
   },
-  headerSpacer: {
-    width: 36,
-    height: 36,
+  avatarButton: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#60A5FA',
+    backgroundColor: '#F1F5F9',
   },
-  headerIconButton: {
-    width: 36,
-    height: 36,
+  avatar: {
+    width: '100%',
+    height: '100%',
+  },
+  profileMenu: {
+    position: 'absolute',
+    top: 18,
+    right: 0,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 8,
+    width: 160,
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    elevation: 6,
+    zIndex: 11,
+  },
+  menuOverlay: {
+    position: 'absolute',
+    top: 72,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
+    paddingHorizontal: 16,
+    alignItems: 'flex-end',
+  },
+  menuBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    left: 0,
+    bottom: 0,
+  },
+  menuItem: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 18,
-    backgroundColor: '#E2E8F0',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  menuItemText: {
+    marginLeft: 10,
+    fontSize: 14,
+    color: '#1E293B',
+    fontWeight: '600',
   },
   content: {
     flex: 1,
@@ -128,49 +170,5 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16,
     color: '#666',
-  },
-  drawerOverlay: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
-  },
-  drawerBackdrop: {
-    flex: 1,
-  },
-  drawer: {
-    width: 220,
-    backgroundColor: '#FFFFFF',
-    paddingVertical: 20,
-    paddingHorizontal: 16,
-    shadowColor: '#0F172A',
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  drawerTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#0F172A',
-    marginBottom: 16,
-  },
-  drawerItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  drawerItemText: {
-    marginLeft: 10,
-    fontSize: 14,
-    color: '#1E293B',
-  },
-  drawerClose: {
-    marginTop: 16,
-    alignSelf: 'flex-start',
-    paddingVertical: 6,
-  },
-  drawerCloseText: {
-    fontSize: 13,
-    color: '#2563EB',
-    fontWeight: '600',
   },
 });

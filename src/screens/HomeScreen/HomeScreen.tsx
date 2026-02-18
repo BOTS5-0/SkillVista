@@ -22,12 +22,15 @@ export const HomeScreen: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [userData, setUserData] = useState<any>(null);
   const [githubData, setGithubData] = useState<GitHubSyncResponse | null>(null);
+  const [skillStrengthScore, setSkillStrengthScore] = useState<number | null>(null);
+  const [skillsData, setSkillsData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
   useFocusEffect(
     React.useCallback(() => {
       loadUserData();
+      loadSkillsData();
     }, [])
   );
 
@@ -37,6 +40,23 @@ export const HomeScreen: React.FC = () => {
       setUserData(user);
     } catch (error) {
       console.warn('Failed to load user data', error);
+    }
+  };
+
+  const loadSkillsData = async () => {
+    try {
+      const data = await api.getGitHubData();
+      if (data.skills && data.skills.length > 0) {
+        setSkillsData(data.skills);
+        // Calculate overall skill strength from top 10 skills' proficiency scores
+        const topSkills = data.skills.slice(0, 10);
+        const avgScore = topSkills.reduce((sum: number, s: any) => sum + (s.proficiencyScore || 0), 0) / topSkills.length;
+        // Normalize to 0-100 scale (scores are typically 0-1 or low values)
+        const normalized = Math.min(100, Math.round(avgScore * 100));
+        setSkillStrengthScore(normalized);
+      }
+    } catch (error) {
+      console.warn('Failed to load skills data', error);
     }
   };
 
@@ -144,6 +164,54 @@ export const HomeScreen: React.FC = () => {
         <View style={styles.content}>
           <Text style={styles.title}>Welcome, {userData?.name || 'User'}!</Text>
           <Text style={styles.subtitle}>Your learning dashboard</Text>
+
+          {skillStrengthScore !== null && (
+            <View style={styles.skillStrengthCard}>
+              <View style={styles.skillStrengthHeader}>
+                <Ionicons name="fitness-outline" size={24} color="#059669" />
+                <Text style={styles.skillStrengthTitle}>Skill Strength Score</Text>
+              </View>
+              <View style={styles.skillStrengthContent}>
+                <View style={styles.skillScoreCircle}>
+                  <Text style={styles.skillScoreValue}>{skillStrengthScore}</Text>
+                  <Text style={styles.skillScoreMax}>/100</Text>
+                </View>
+                <View style={styles.skillStrengthMeter}>
+                  <View style={styles.skillMeterTrack}>
+                    <View 
+                      style={[
+                        styles.skillMeterFill, 
+                        { width: `${skillStrengthScore}%` },
+                        skillStrengthScore >= 70 ? styles.skillMeterHigh :
+                        skillStrengthScore >= 40 ? styles.skillMeterMedium :
+                        styles.skillMeterLow
+                      ]} 
+                    />
+                  </View>
+                  <Text style={styles.skillStrengthLabel}>
+                    {skillStrengthScore >= 70 ? 'Strong' :
+                     skillStrengthScore >= 40 ? 'Growing' : 'Building'}
+                  </Text>
+                </View>
+              </View>
+              {skillsData.length > 0 && (
+                <View style={styles.topProficientSkills}>
+                  <Text style={styles.topSkillsLabel}>Top proficient skills:</Text>
+                  <View style={styles.proficientSkillsList}>
+                    {skillsData.slice(0, 3).map((s: any, idx: number) => (
+                      // @ts-ignore - key is valid prop in React
+                      <View key={`prof-${idx}`} style={styles.proficientSkillBadge}>
+                        <Text style={styles.proficientSkillText}>{s.skill}</Text>
+                        <Text style={styles.proficientSkillScore}>
+                          {Math.round((s.proficiencyScore || 0) * 100)}%
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+          )}
 
           {!githubData && (
             <TouchableOpacity
@@ -405,5 +473,118 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  skillStrengthCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 24,
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#D1FAE5',
+  },
+  skillStrengthHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 16,
+  },
+  skillStrengthTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  skillStrengthContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  skillScoreCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#059669',
+  },
+  skillScoreValue: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#059669',
+  },
+  skillScoreMax: {
+    fontSize: 10,
+    color: '#6B7280',
+    marginTop: -4,
+  },
+  skillStrengthMeter: {
+    flex: 1,
+  },
+  skillMeterTrack: {
+    height: 12,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  skillMeterFill: {
+    height: '100%',
+    borderRadius: 6,
+  },
+  skillMeterHigh: {
+    backgroundColor: '#059669',
+  },
+  skillMeterMedium: {
+    backgroundColor: '#F59E0B',
+  },
+  skillMeterLow: {
+    backgroundColor: '#EF4444',
+  },
+  skillStrengthLabel: {
+    fontSize: 13,
+    color: '#64748B',
+    fontWeight: '600',
+    marginTop: 6,
+  },
+  topProficientSkills: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  topSkillsLabel: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 8,
+  },
+  proficientSkillsList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  proficientSkillBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderRadius: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  proficientSkillText: {
+    fontSize: 12,
+    color: '#166534',
+    fontWeight: '600',
+  },
+  proficientSkillScore: {
+    fontSize: 11,
+    color: '#059669',
+    fontWeight: '700',
   },
 });

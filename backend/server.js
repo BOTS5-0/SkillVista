@@ -8,6 +8,7 @@ const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const axios = require('axios');
+const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
@@ -35,8 +36,13 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || '';
 const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
+const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || '';
 const NLP_SERVICE_URL = process.env.NLP_SERVICE_URL || 'http://127.0.0.1:8000';
 const DEFAULT_ENTITY_LABELS = ['Language', 'Framework', 'Database', 'CloudService', 'Tool', 'Concept'];
+const ENABLE_SYNC_JOBS = ['1', 'true', 'yes', 'on'].includes(String(process.env.ENABLE_SYNC_JOBS || 'true').toLowerCase());
+const SYNC_SCHEDULE = process.env.SYNC_SCHEDULE || '*/15 * * * *';
+const AUTO_SYNC_INTERVAL_MINUTES = Math.max(Number(process.env.AUTO_SYNC_INTERVAL_MINUTES) || 30, 5);
+const QUEUE_DRAIN_BATCH = Math.max(Number(process.env.QUEUE_DRAIN_BATCH) || 5, 1);
 
 // Temporary in-memory stores for OAuth state (short-lived, don't need DB)
 const pendingGithubStates = new Map();
@@ -47,7 +53,6 @@ const backgroundSyncStatus = new Map(); // userId -> { inProgress: boolean, last
 
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
 app.use(morgan('dev'));
 app.use(
   `${API_PREFIX}/`,
@@ -106,6 +111,108 @@ const resolveAlias = async (text, fallbackType) => {
     targetType: data.target_type
   };
 };
+
+const isGithubWebhookSignatureValid = (rawBody, signatureHeader) => {
+  if (!GITHUB_WEBHOOK_SECRET) return false;
+  const signature = safeString(signatureHeader);
+  if (!signature.startsWith('sha256=')) return false;
+  const expected = `sha256=${crypto
+    .createHmac('sha256', GITHUB_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest('hex')}`;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch (_error) {
+    return false;
+  }
+};
+
+app.post(`${API_PREFIX}/integrations/github/webhook`, express.raw({ type: '*/*' }), async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Database unavailable' });
+  if (!GITHUB_WEBHOOK_SECRET) return res.status(500).json({ error: 'Missing GITHUB_WEBHOOK_SECRET' });
+
+  const isValid = isGithubWebhookSignatureValid(req.body, req.headers['x-hub-signature-256']);
+  if (!isValid) return res.status(401).json({ error: 'Invalid webhook signature' });
+
+  const event = safeString(req.headers['x-github-event']);
+  const deliveryId = safeString(req.headers['x-github-delivery']);
+  let payload = {};
+  try {
+    payload = JSON.parse(Buffer.from(req.body).toString('utf8'));
+  } catch (_error) {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  if (event === 'ping') {
+    return res.json({ ok: true, event: 'ping', deliveryId });
+  }
+
+  if (!['push', 'repository', 'installation_repositories', 'create', 'release'].includes(event)) {
+    return res.json({ ok: true, ignored: true, event, deliveryId });
+  }
+
+  const senderId = payload?.sender?.id ? String(payload.sender.id) : null;
+  const senderLogin = safeString(payload?.sender?.login);
+
+  let queryBuilder = supabase
+    .from('integration_accounts')
+    .select('student_id, access_token, external_user_id, external_username')
+    .eq('provider', 'github');
+
+  if (senderId) {
+    queryBuilder = queryBuilder.eq('external_user_id', senderId);
+  } else if (senderLogin) {
+    queryBuilder = queryBuilder.ilike('external_username', senderLogin);
+  }
+
+  const { data: accounts, error: accountError } = await queryBuilder;
+  if (accountError) {
+    return res.status(500).json({ error: accountError.message, deliveryId });
+  }
+
+  const matched = Array.isArray(accounts) ? accounts : [];
+  if (!matched.length) {
+    return res.json({ ok: true, event, deliveryId, matchedAccounts: 0 });
+  }
+
+  for (const account of matched) {
+    const token = safeString(account.access_token);
+    const studentId = Number(account.student_id);
+    if (!token || !studentId) continue;
+    backgroundSyncStatus.set(studentId, {
+      inProgress: true,
+      startedAt: new Date().toISOString(),
+      lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
+      error: null
+    });
+
+    runGithubSync({ token, limit: 50, includePrivate: true, studentId })
+      .then(() => {
+        backgroundSyncStatus.set(studentId, {
+          inProgress: false,
+          lastSyncAt: new Date().toISOString(),
+          error: null
+        });
+      })
+      .catch((error) => {
+        backgroundSyncStatus.set(studentId, {
+          inProgress: false,
+          lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
+          error: error.message || 'Webhook-triggered sync failed'
+        });
+      });
+  }
+
+  return res.status(202).json({
+    ok: true,
+    event,
+    deliveryId,
+    matchedAccounts: matched.length,
+    autoSyncTriggered: true
+  });
+});
+
+app.use(express.json());
 
 const createAuthToken = (user) =>
   jwt.sign(
@@ -813,15 +920,9 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
             metadata: {
               stars: repo.stargazers_count,
               forks: repo.forks_count,
-              watchers: repo.watchers_count,
               language: repo.language,
               topics: repo.topics,
-              private: repo.private,
-              pushed_at: repo.pushed_at,
-              created_at: repo.created_at,
-              open_issues: repo.open_issues_count,
-              default_branch: repo.default_branch,
-              full_name: repo.full_name
+              private: repo.private
             }
           });
           
@@ -1392,10 +1493,10 @@ app.get(`${API_PREFIX}/integrations/github/data`, authGuard, async (req, res) =>
         .eq('student_id', req.user.id)
         .order('proficiency_score', { ascending: false }),
       
-      // Projects with linked skills
+      // Projects
       supabase
         .from('projects')
-        .select('id, name, description, url, metadata, last_synced_at, project_skills(skill:skills(name))')
+        .select('id, name, description, url, metadata, last_synced_at')
         .eq('student_id', req.user.id)
         .order('last_synced_at', { ascending: false }),
       
@@ -2002,6 +2103,118 @@ const runQueueWorkerOnce = async () => {
   }
 };
 
+const shouldSkipAutoSyncByRecentRun = async (studentId) => {
+  if (!supabase) return true;
+  const { data, error } = await supabase
+    .from('sync_runs')
+    .select('finished_at')
+    .eq('student_id', studentId)
+    .eq('provider', 'github')
+    .eq('status', 'success')
+    .order('finished_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error || !data?.finished_at) return false;
+  const last = new Date(data.finished_at).getTime();
+  const now = Date.now();
+  return now - last < AUTO_SYNC_INTERVAL_MINUTES * 60 * 1000;
+};
+
+const runAutoGithubSyncSweep = async () => {
+  if (!supabase) return { scanned: 0, triggered: 0 };
+
+  const { data: accounts, error } = await supabase
+    .from('integration_accounts')
+    .select('student_id, access_token, external_username')
+    .eq('provider', 'github');
+
+  if (error) {
+    throw new Error(`Auto sync sweep failed: ${error.message}`);
+  }
+
+  const rows = Array.isArray(accounts) ? accounts : [];
+  let triggered = 0;
+
+  for (const account of rows) {
+    const studentId = Number(account.student_id);
+    const token = safeString(account.access_token);
+    if (!studentId || !token) continue;
+
+    const status = backgroundSyncStatus.get(studentId);
+    if (status?.inProgress) continue;
+
+    // eslint-disable-next-line no-await-in-loop
+    const skipByRecency = await shouldSkipAutoSyncByRecentRun(studentId);
+    if (skipByRecency) continue;
+
+    backgroundSyncStatus.set(studentId, {
+      inProgress: true,
+      startedAt: new Date().toISOString(),
+      lastSyncAt: status?.lastSyncAt || null,
+      error: null
+    });
+
+    runGithubSync({ token, limit: 50, includePrivate: true, studentId })
+      .then(() => {
+        backgroundSyncStatus.set(studentId, {
+          inProgress: false,
+          lastSyncAt: new Date().toISOString(),
+          error: null
+        });
+      })
+      .catch((syncError) => {
+        backgroundSyncStatus.set(studentId, {
+          inProgress: false,
+          lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
+          error: syncError.message || 'Auto sweep sync failed'
+        });
+      });
+    triggered += 1;
+  }
+
+  return { scanned: rows.length, triggered };
+};
+
+const drainQueueBatch = async (maxJobs = QUEUE_DRAIN_BATCH) => {
+  let processed = 0;
+  for (let i = 0; i < maxJobs; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await runQueueWorkerOnce();
+    if (!result.processed) break;
+    processed += 1;
+  }
+  return { processed };
+};
+
+const startBackgroundSchedulers = () => {
+  if (!ENABLE_SYNC_JOBS) {
+    console.log('Background schedulers disabled via ENABLE_SYNC_JOBS=false');
+    return;
+  }
+
+  if (!cron.validate(SYNC_SCHEDULE)) {
+    console.error(`Invalid SYNC_SCHEDULE: "${SYNC_SCHEDULE}"`);
+    return;
+  }
+
+  cron.schedule(SYNC_SCHEDULE, async () => {
+    try {
+      const sweep = await runAutoGithubSyncSweep();
+      const queue = await drainQueueBatch(QUEUE_DRAIN_BATCH);
+      console.log(
+        `[scheduler] github_scanned=${sweep.scanned} github_triggered=${sweep.triggered} queue_processed=${queue.processed}`
+      );
+    } catch (error) {
+      console.error('[scheduler] tick failed:', error.message);
+    }
+  });
+
+  console.log(
+    `Background schedulers started (SYNC_SCHEDULE=${SYNC_SCHEDULE}, AUTO_SYNC_INTERVAL_MINUTES=${AUTO_SYNC_INTERVAL_MINUTES}, QUEUE_DRAIN_BATCH=${QUEUE_DRAIN_BATCH})`
+  );
+};
+
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
   const token = await getGithubTokenForUser(req.user.id);
   if (!token) {
@@ -2319,4 +2532,5 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`SkillVista backend running on http://localhost:${PORT}${API_PREFIX}`);
+  startBackgroundSchedulers();
 });

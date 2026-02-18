@@ -44,11 +44,18 @@ interface Project {
   project_skills?: ProjectSkill[];
 }
 
+type SortOption = 'popularity' | 'stars' | 'watchers' | 'recent';
+type TabOption = 'top' | 'active';
+
 export const ProjectsScreen: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjects, setActiveProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set());
+  const [sortBy, setSortBy] = useState<SortOption>('popularity');
+  const [activeTab, setActiveTab] = useState<TabOption>('top');
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
   const router = useRouter();
 
   useEffect(() => {
@@ -60,15 +67,7 @@ export const ProjectsScreen: React.FC = () => {
       setIsLoading(true);
       setError(null);
       const data = await api.getGitHubData();
-      // Get top 5 projects sorted by stars (from metadata)
-      const sortedProjects = (data.projects || [])
-        .sort((a: Project, b: Project) => {
-          const starsA = a.metadata?.stars || 0;
-          const starsB = b.metadata?.stars || 0;
-          return starsB - starsA;
-        })
-        .slice(0, 5);
-      setProjects(sortedProjects);
+      setAllProjects(data.projects || []);
     } catch (err: any) {
       console.error('Failed to load projects:', err);
       setError(err.message || 'Failed to load projects');
@@ -76,6 +75,47 @@ export const ProjectsScreen: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  // Calculate popularity score (weighted combination of stars, watchers, forks)
+  const getPopularityScore = (project: Project): number => {
+    const stars = project.metadata?.stars || 0;
+    const watchers = project.metadata?.watchers || 0;
+    const forks = project.metadata?.forks || 0;
+    // Weight: stars (3x), forks (2x), watchers (1x)
+    return (stars * 3) + (forks * 2) + watchers;
+  };
+
+  // Sort and filter projects based on selected option
+  useEffect(() => {
+    if (allProjects.length === 0) return;
+    
+    const sorted = [...allProjects].sort((a: Project, b: Project) => {
+      switch (sortBy) {
+        case 'popularity':
+          return getPopularityScore(b) - getPopularityScore(a);
+        case 'stars':
+          return (b.metadata?.stars || 0) - (a.metadata?.stars || 0);
+        case 'watchers':
+          return (b.metadata?.watchers || 0) - (a.metadata?.watchers || 0);
+        case 'recent':
+          const dateA = a.metadata?.pushed_at ? new Date(a.metadata.pushed_at).getTime() : 0;
+          const dateB = b.metadata?.pushed_at ? new Date(b.metadata.pushed_at).getTime() : 0;
+          return dateB - dateA;
+        default:
+          return 0;
+      }
+    });
+    
+    setProjects(sorted.slice(0, 5));
+    
+    // Also set active projects (latest 3 by pushed_at)
+    const recentlySorted = [...allProjects].sort((a: Project, b: Project) => {
+      const dateA = a.metadata?.pushed_at ? new Date(a.metadata.pushed_at).getTime() : 0;
+      const dateB = b.metadata?.pushed_at ? new Date(b.metadata.pushed_at).getTime() : 0;
+      return dateB - dateA;
+    });
+    setActiveProjects(recentlySorted.slice(0, 3));
+  }, [allProjects, sortBy]);
 
   const handleOpenProject = (url: string) => {
     if (url) {
@@ -138,8 +178,37 @@ export const ProjectsScreen: React.FC = () => {
         <TouchableOpacity style={styles.backButton} onPress={handleGoBack}>
           <Ionicons name="arrow-back" size={24} color="#0F172A" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Top Projects</Text>
+        <Text style={styles.headerTitle}>Projects</Text>
         <View style={styles.headerSpacer} />
+      </View>
+
+      <View style={styles.tabBar}>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'top' && styles.tabActive]}
+          onPress={() => setActiveTab('top')}
+        >
+          <Ionicons 
+            name="trophy-outline" 
+            size={18} 
+            color={activeTab === 'top' ? '#1D4ED8' : '#64748B'} 
+          />
+          <Text style={[styles.tabText, activeTab === 'top' && styles.tabTextActive]}>
+            Top Projects
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'active' && styles.tabActive]}
+          onPress={() => setActiveTab('active')}
+        >
+          <Ionicons 
+            name="pulse-outline" 
+            size={18} 
+            color={activeTab === 'active' ? '#1D4ED8' : '#64748B'} 
+          />
+          <Text style={[styles.tabText, activeTab === 'active' && styles.tabTextActive]}>
+            Active Projects
+          </Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -159,7 +228,7 @@ export const ProjectsScreen: React.FC = () => {
               <Text style={styles.retryButtonText}>Retry</Text>
             </TouchableOpacity>
           </View>
-        ) : projects.length === 0 ? (
+        ) : projects.length === 0 && activeProjects.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="folder-open-outline" size={64} color="#94A3B8" />
             <Text style={styles.emptyTitle}>No Projects Yet</Text>
@@ -167,11 +236,57 @@ export const ProjectsScreen: React.FC = () => {
               Connect your GitHub to sync your repositories as projects.
             </Text>
           </View>
-        ) : (
+        ) : activeTab === 'top' ? (
           <View style={styles.content}>
             <Text style={styles.subtitle}>
               Your top {projects.length} GitHub projects
             </Text>
+
+            <View style={styles.sortContainer}>
+              <Text style={styles.sortLabel}>Sort by:</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.sortOptions}
+              >
+                <TouchableOpacity
+                  style={[styles.sortButton, sortBy === 'popularity' && styles.sortButtonActive]}
+                  onPress={() => setSortBy('popularity')}
+                >
+                  <Ionicons name="trending-up" size={14} color={sortBy === 'popularity' ? '#fff' : '#64748B'} />
+                  <Text style={[styles.sortButtonText, sortBy === 'popularity' && styles.sortButtonTextActive]}>
+                    Popular
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sortButton, sortBy === 'stars' && styles.sortButtonActive]}
+                  onPress={() => setSortBy('stars')}
+                >
+                  <Ionicons name="star" size={14} color={sortBy === 'stars' ? '#fff' : '#64748B'} />
+                  <Text style={[styles.sortButtonText, sortBy === 'stars' && styles.sortButtonTextActive]}>
+                    Stars
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sortButton, sortBy === 'watchers' && styles.sortButtonActive]}
+                  onPress={() => setSortBy('watchers')}
+                >
+                  <Ionicons name="eye" size={14} color={sortBy === 'watchers' ? '#fff' : '#64748B'} />
+                  <Text style={[styles.sortButtonText, sortBy === 'watchers' && styles.sortButtonTextActive]}>
+                    Views
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sortButton, sortBy === 'recent' && styles.sortButtonActive]}
+                  onPress={() => setSortBy('recent')}
+                >
+                  <Ionicons name="time" size={14} color={sortBy === 'recent' ? '#fff' : '#64748B'} />
+                  <Text style={[styles.sortButtonText, sortBy === 'recent' && styles.sortButtonTextActive]}>
+                    Recent
+                  </Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
 
             {projects.map((project, index) => (
               <TouchableOpacity
@@ -302,6 +417,86 @@ export const ProjectsScreen: React.FC = () => {
               </TouchableOpacity>
             ))}
           </View>
+        ) : (
+          <View style={styles.content}>
+            <View style={styles.activeHeader}>
+              <View style={styles.activePulse}>
+                <Ionicons name="pulse" size={20} color="#059669" />
+              </View>
+              <View>
+                <Text style={styles.activeTitle}>Active Projects</Text>
+                <Text style={styles.activeSubtitle}>
+                  Your {activeProjects.length} most recently updated projects
+                </Text>
+              </View>
+            </View>
+
+            {activeProjects.length === 0 ? (
+              <View style={styles.emptyActiveContainer}>
+                <Text style={styles.emptyActiveText}>No active projects found</Text>
+              </View>
+            ) : (
+              activeProjects.map((project, index) => (
+                <TouchableOpacity
+                  key={project.id}
+                  style={styles.activeProjectCard}
+                  onPress={() => handleOpenProject(project.url)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.activeProjectHeader}>
+                    <View style={styles.activeIndicator} />
+                    <View style={styles.activeProjectInfo}>
+                      <Text style={styles.activeProjectName} numberOfLines={1}>
+                        {project.name}
+                      </Text>
+                      {project.metadata?.pushed_at && (
+                        <Text style={styles.activeProjectTime}>
+                          {getRelativeTime(project.metadata.pushed_at)}
+                        </Text>
+                      )}
+                    </View>
+                    {project.metadata?.private && (
+                      <View style={styles.privateBadge}>
+                        <Ionicons name="lock-closed" size={10} color="#6B7280" />
+                      </View>
+                    )}
+                  </View>
+
+                  {project.description && (
+                    <Text style={styles.activeProjectDescription} numberOfLines={1}>
+                      {project.description}
+                    </Text>
+                  )}
+
+                  <View style={styles.activeProjectStats}>
+                    {project.metadata?.language && (
+                      <View style={styles.stat}>
+                        <View
+                          style={[
+                            styles.languageDot,
+                            { backgroundColor: getLanguageColor(project.metadata.language) },
+                          ]}
+                        />
+                        <Text style={styles.statText}>{project.metadata.language}</Text>
+                      </View>
+                    )}
+                    <View style={styles.stat}>
+                      <Ionicons name="star-outline" size={12} color="#64748B" />
+                      <Text style={styles.statText}>
+                        {project.metadata?.stars?.toLocaleString() || 0}
+                      </Text>
+                    </View>
+                    <View style={styles.stat}>
+                      <Ionicons name="git-branch-outline" size={12} color="#64748B" />
+                      <Text style={styles.statText}>
+                        {project.metadata?.default_branch || 'main'}
+                      </Text>
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -360,6 +555,34 @@ const styles = StyleSheet.create({
   },
   headerSpacer: {
     width: 44,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    gap: 6,
+    borderRadius: 8,
+  },
+  tabActive: {
+    backgroundColor: '#EFF6FF',
+  },
+  tabText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  tabTextActive: {
+    color: '#1D4ED8',
   },
   scrollContent: {
     flexGrow: 1,
@@ -424,7 +647,42 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 14,
     color: '#64748B',
+    marginBottom: 12,
+  },
+  sortContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 16,
+  },
+  sortLabel: {
+    fontSize: 13,
+    color: '#64748B',
+    fontWeight: '500',
+    marginRight: 8,
+  },
+  sortOptions: {
+    flexDirection: 'row',
+  },
+  sortButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: '#F1F5F9',
+    marginRight: 8,
+    gap: 4,
+  },
+  sortButtonActive: {
+    backgroundColor: '#1D4ED8',
+  },
+  sortButtonText: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  sortButtonTextActive: {
+    color: '#fff',
   },
   projectCard: {
     backgroundColor: '#FFFFFF',
@@ -611,5 +869,92 @@ const styles = StyleSheet.create({
   syncedText: {
     fontSize: 12,
     color: '#94A3B8',
+  },
+  activeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    gap: 12,
+  },
+  activePulse: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  activeSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  emptyActiveContainer: {
+    padding: 24,
+    alignItems: 'center',
+  },
+  emptyActiveText: {
+    fontSize: 14,
+    color: '#64748B',
+  },
+  activeProjectCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: '#059669',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  activeProjectHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  activeIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#059669',
+    marginRight: 10,
+  },
+  activeProjectInfo: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  activeProjectName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#0F172A',
+    flex: 1,
+  },
+  activeProjectTime: {
+    fontSize: 12,
+    color: '#059669',
+    fontWeight: '500',
+    marginLeft: 8,
+  },
+  activeProjectDescription: {
+    fontSize: 13,
+    color: '#64748B',
+    marginBottom: 10,
+    marginLeft: 18,
+  },
+  activeProjectStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginLeft: 18,
   },
 });

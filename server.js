@@ -364,17 +364,90 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
 
     pendingGithubStates.delete(state);
 
-    return res.json({
-      success: true,
-      message: 'GitHub OAuth connected. You can now call /api/integrations/github/oauth/sync with your JWT.',
-      connectedUserId: pendingState.userId
-    });
+    // Return a nice HTML page so user knows to go back to app
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>GitHub Connected - SkillVista</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #1D4ED8 0%, #3B82F6 100%);
+            color: white;
+          }
+          .container {
+            text-align: center;
+            padding: 40px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+          }
+          .checkmark {
+            font-size: 64px;
+            margin-bottom: 20px;
+          }
+          h1 { margin: 0 0 10px 0; font-size: 24px; }
+          p { margin: 0; opacity: 0.9; font-size: 16px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="checkmark">✓</div>
+          <h1>GitHub Connected!</h1>
+          <p>You can now close this window and return to SkillVista.</p>
+        </div>
+      </body>
+      </html>
+    `);
   } catch (error) {
     pendingGithubStates.delete(state);
-    return res.status(502).json({
-      error: 'Failed to complete GitHub OAuth callback',
-      details: error.response?.data || error.message
-    });
+    return res.status(502).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Connection Failed - SkillVista</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #DC2626 0%, #EF4444 100%);
+            color: white;
+          }
+          .container {
+            text-align: center;
+            padding: 40px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+          }
+          .icon { font-size: 64px; margin-bottom: 20px; }
+          h1 { margin: 0 0 10px 0; font-size: 24px; }
+          p { margin: 0; opacity: 0.9; font-size: 16px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="icon">✕</div>
+          <h1>Connection Failed</h1>
+          <p>Please close this window and try again in SkillVista.</p>
+        </div>
+      </body>
+      </html>
+    `);
   }
 });
 

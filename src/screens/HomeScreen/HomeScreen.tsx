@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import { api, GitHubSyncResponse } from '@/services/api';
 import { mockProfile } from '@/data/mockData';
 
@@ -39,13 +40,27 @@ export const HomeScreen: React.FC = () => {
     }
   };
 
-  const loadGitHubData = async () => {
+  const handleGitHubOAuth = async () => {
     setIsLoading(true);
     try {
-      const data = await api.syncGitHubRepos();
+      // Step 1: Get the OAuth URL from our backend
+      const { authUrl } = await api.getGithubOAuthUrl();
+      
+      // Step 2: Open GitHub authorization page in browser
+      const result = await WebBrowser.openBrowserAsync(authUrl);
+      
+      // Step 3: After user returns from browser, fetch their GitHub data
+      if (result.type === 'cancel') {
+        // User cancelled, but they might have already authorized
+        // Try to sync anyway
+      }
+      
+      // Step 4: Sync GitHub repos using the OAuth token stored on server
+      const data = await api.syncGitHubReposOAuth();
       setGithubData(data);
+      Alert.alert('Success', 'GitHub profile synced successfully!');
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to load GitHub data');
+      Alert.alert('Error', error.message || 'Failed to connect GitHub');
     } finally {
       setIsLoading(false);
     }
@@ -109,7 +124,7 @@ export const HomeScreen: React.FC = () => {
           {!githubData && (
             <TouchableOpacity
               style={styles.syncButton}
-              onPress={loadGitHubData}
+              onPress={handleGitHubOAuth}
               disabled={isLoading}
             >
               {isLoading ? (
@@ -117,7 +132,7 @@ export const HomeScreen: React.FC = () => {
               ) : (
                 <>
                   <Ionicons name="logo-github" size={18} color="#fff" />
-                  <Text style={styles.syncButtonText}>Sync GitHub Profile</Text>
+                  <Text style={styles.syncButtonText}>Connect GitHub</Text>
                 </>
               )}
             </TouchableOpacity>

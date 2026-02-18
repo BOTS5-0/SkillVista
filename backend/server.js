@@ -1096,6 +1096,8 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
 app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
   const email = safeString(req.body?.email).toLowerCase();
   const password = safeString(req.body?.password);
+  
+  console.log('LOGIN ATTEMPT:', email);
 
   if (!supabase) {
     return res.status(500).json({ error: 'Database not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' });
@@ -1108,6 +1110,8 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
       .select('id, name, email, password_hash, auth_user_id')
       .eq('email', email)
       .single();
+    
+    console.log('Found student:', student?.id, 'auth_user_id:', student?.auth_user_id);
 
     if (error || !student) {
       return res.status(401).json({ error: 'Invalid credentials' });

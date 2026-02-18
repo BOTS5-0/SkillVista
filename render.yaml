@@ -2,7 +2,7 @@ services:
   - type: web
     name: skillvista
     runtime: node
-    buildCommand: npm ci
+    buildCommand: npm ci --legacy-peer-deps
     startCommand: node server.js
     envVars:
       - key: NODE_ENV

@@ -55,5 +55,18 @@
     "react-test-renderer": "^19.1.0",
     "typescript": "~5.9.2"
   },
-  "private": true
+  "private": true,
+  "description": "SkillVista is an Expo + React Native app with a frontend-only authentication flow (login, registration, forgot password) and a simple home screen. Routing is handled in-app via state (no backend auth yet).",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BOTS5-0/SkillVista.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/BOTS5-0/SkillVista/issues"
+  },
+  "homepage": "https://github.com/BOTS5-0/SkillVista#readme"
 }

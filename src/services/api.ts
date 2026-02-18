@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { appEnv } from '@/config/env';
 
-const API_BASE_URL = 'https://skillvista.onrender.com/api';
+const API_BASE_URL = 'https://skillvista-1.onrender.com/api';
 const AUTH_TOKEN_KEY = 'skillvista.auth.token';
 const USER_DATA_KEY = 'skillvista.user.data';
 

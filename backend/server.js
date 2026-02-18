@@ -114,21 +114,118 @@ const inferSkills = (repos) => {
     }
 
     const description = `${safeString(repo.name)} ${safeString(repo.description)}`.toLowerCase();
+    
+    // Comprehensive skill keywords from keywords.csv
     const keywords = [
-      'react',
-      'node',
-      'express',
-      'next',
-      'typescript',
-      'javascript',
-      'python',
-      'java',
-      'go',
-      'docker',
-      'kubernetes',
-      'graphql',
-      'postgres',
-      'mongodb'
+      // Languages
+      'javascript', 'typescript', 'python', 'java', 'c#', 'c++', 'c', 'php', 'ruby', 'go',
+      'swift', 'kotlin', 'rust', 'scala', 'dart', 'lua', 'r', 'matlab', 'julia', 'perl',
+      'haskell', 'elixir', 'clojure', 'erlang', 'f#', 'groovy', 'ocaml', 'assembly', 'cobol',
+      'fortran', 'vhdl', 'verilog', 'sql', 'html', 'css', 'sass', 'less', 'xml', 'json',
+      'yaml', 'markdown', 'latex', 'bash', 'powershell', 'zsh', 'awk', 'sed',
+      
+      // Frontend Frameworks
+      'react', 'vue', 'vue.js', 'angular', 'next.js', 'nextjs', 'nuxt', 'nuxt.js', 'svelte',
+      'sveltekit', 'astro', 'remix', 'solid.js', 'solidjs', 'qwik', 'alpine.js', 'alpinejs',
+      'ember', 'ember.js', 'backbone', 'backbone.js', 'jquery', 'bootstrap', 'tailwind',
+      'tailwindcss', 'material-ui', 'mui', 'chakra', 'chakra-ui', 'ant-design', 'antd',
+      
+      // Backend Frameworks
+      'node', 'node.js', 'nodejs', 'express', 'express.js', 'expressjs', 'fastify', 'koa',
+      'hapi', 'nestjs', 'nest.js', 'django', 'flask', 'fastapi', 'spring', 'spring-boot',
+      'springboot', 'rails', 'ruby-on-rails', 'laravel', 'symfony', 'phoenix', 'asp.net',
+      'aspnet', '.net', 'dotnet', 'gin', 'echo', 'fiber', 'actix', 'rocket',
+      
+      // Mobile
+      'react-native', 'reactnative', 'flutter', 'swiftui', 'uikit', 'jetpack-compose',
+      'xamarin', 'ionic', 'capacitor', 'nativescript', 'expo',
+      
+      // AI/ML
+      'tensorflow', 'pytorch', 'scikit-learn', 'sklearn', 'keras', 'huggingface',
+      'hugging-face', 'opencv', 'numpy', 'pandas', 'matplotlib', 'seaborn', 'plotly',
+      'jupyter', 'nltk', 'spacy', 'langchain', 'openai', 'gpt', 'llm', 'stable-diffusion',
+      'mlflow', 'machine-learning', 'deep-learning', 'neural-network', 'ai', 'ml',
+      
+      // Databases
+      'postgresql', 'postgres', 'mysql', 'mariadb', 'sqlite', 'oracle', 'sql-server',
+      'sqlserver', 'mongodb', 'dynamodb', 'cassandra', 'couchdb', 'neo4j', 'influxdb',
+      'timescaledb', 'cockroachdb', 'fauna', 'planetscale', 'supabase', 'firebase',
+      
+      // Caching & Messaging
+      'redis', 'memcached', 'rabbitmq', 'kafka', 'celery', 'bull', 'zeromq',
+      
+      // ORMs & APIs
+      'graphql', 'apollo', 'prisma', 'hasura', 'typeorm', 'sequelize', 'mongoose',
+      'hibernate', 'sqlalchemy', 'drizzle', 'kysely', 'rest', 'restful', 'grpc',
+      
+      // Cloud Platforms
+      'aws', 'amazon-web-services', 'azure', 'gcp', 'google-cloud', 'firebase', 'appwrite',
+      'cloudflare', 'cloudflare-workers', 'deno', 'vercel', 'netlify', 'heroku',
+      'digitalocean', 'linode', 'render', 'railway',
+      
+      // Containers & Virtualization
+      'docker', 'kubernetes', 'k8s', 'podman', 'vagrant', 'vmware', 'hyper-v',
+      
+      // Infrastructure as Code
+      'terraform', 'ansible', 'puppet', 'chef', 'pulumi',
+      
+      // CI/CD
+      'jenkins', 'github-actions', 'gitlab-ci', 'circleci', 'travis-ci', 'argocd', 'argo',
+      
+      // Web Servers & Proxies
+      'nginx', 'apache', 'caddy', 'traefik', 'kong', 'haproxy',
+      
+      // Testing
+      'jest', 'mocha', 'jasmine', 'cypress', 'playwright', 'puppeteer', 'selenium',
+      'webdriverio', 'vitest', 'testing-library', 'pytest', 'junit', 'rspec',
+      
+      // Build Tools
+      'webpack', 'vite', 'esbuild', 'rollup', 'parcel', 'gulp', 'grunt', 'npm', 'yarn',
+      'pnpm', 'bun', 'turbo', 'turborepo',
+      
+      // Version Control
+      'git', 'github', 'gitlab', 'bitbucket',
+      
+      // Search
+      'elasticsearch', 'elastic', 'algolia', 'meilisearch', 'solr',
+      
+      // Payments & Auth
+      'stripe', 'paypal', 'square', 'auth0', 'okta', 'clerk', 'cognito', 'keycloak',
+      
+      // Communication Services
+      'twilio', 'sendgrid', 'mailchimp', 'ses',
+      
+      // Mapping
+      'openstreetmap', 'mapbox', 'leaflet', 'google-maps',
+      
+      // Web Technologies
+      'webassembly', 'wasm', 'webrtc', 'webgl', 'three.js', 'threejs', 'd3', 'd3.js',
+      'chart.js', 'chartjs', 'websocket', 'socket.io', 'socketio',
+      
+      // IoT
+      'arduino', 'raspberry-pi', 'raspberrypi', 'esp32', 'mqtt', 'iot',
+      
+      // Big Data
+      'spark', 'hadoop', 'hive', 'flink', 'airflow', 'snowflake', 'databricks',
+      'tableau', 'power-bi', 'powerbi', 'looker',
+      
+      // Monitoring & Observability
+      'sonarqube', 'sentry', 'newrelic', 'datadog', 'splunk', 'elk', 'logstash',
+      'kibana', 'prometheus', 'grafana', 'nagios', 'zabbix',
+      
+      // Service Mesh & K8s Tools
+      'helm', 'istio', 'linkerd', 'openshift',
+      
+      // Security
+      'oauth', 'jwt', 'ssl', 'tls', 'https', 'encryption', 'security', 'pentesting',
+      'owasp', 'vault', 'burp-suite',
+      
+      // Architecture
+      'microservices', 'monolith', 'serverless', 'event-driven', 'lambda', 'functions',
+      
+      // Methodologies
+      'tdd', 'ddd', 'oop', 'functional', 'agile', 'scrum', 'kanban', 'devops', 'sre',
+      'gitflow', 'cicd', 'ci/cd'
     ];
 
     for (const keyword of keywords) {

@@ -288,6 +288,45 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
     return res.status(400).json({ error: 'name, email, and password are required' });
   }
 
+  // Check if Supabase is configured
+  if (supabase) {
+    // Check if user exists in Supabase
+    const { data: existing } = await supabase
+      .from('students')
+      .select('id')
+      .eq('email', email)
+      .single();
+    
+    if (existing) {
+      return res.status(409).json({ error: 'User already exists' });
+    }
+
+    // Create user in Supabase
+    const passwordHash = await bcrypt.hash(password, 10);
+    const { data: newStudent, error } = await supabase
+      .from('students')
+      .insert({ name, email, password_hash: passwordHash })
+      .select('id, name, email')
+      .single();
+    
+    if (error) {
+      console.error('Supabase register error:', error);
+      return res.status(500).json({ error: 'Failed to create user' });
+    }
+
+    // Also cache in memory for token operations
+    const user = { id: String(newStudent.id), name: newStudent.name, email: newStudent.email, passwordHash };
+    usersByEmail.set(email, user);
+    usersById.set(user.id, user);
+
+    const token = createAuthToken(user);
+    return res.status(201).json({
+      token,
+      user: { id: user.id, name: user.name, email: user.email }
+    });
+  }
+
+  // Fallback to in-memory if Supabase not configured
   if (usersByEmail.has(email)) {
     return res.status(409).json({ error: 'User already exists' });
   }
@@ -312,6 +351,38 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
 app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
   const email = safeString(req.body?.email).toLowerCase();
   const password = safeString(req.body?.password);
+
+  // Check if Supabase is configured
+  if (supabase) {
+    const { data: student, error } = await supabase
+      .from('students')
+      .select('id, name, email, password_hash')
+      .eq('email', email)
+      .single();
+    
+    if (error || !student) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (!student.password_hash) {
+      return res.status(401).json({ error: 'Account not set up for password login' });
+    }
+
+    const valid = await bcrypt.compare(password, student.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Cache in memory for token operations
+    const user = { id: String(student.id), name: student.name, email: student.email, passwordHash: student.password_hash };
+    usersByEmail.set(email, user);
+    usersById.set(user.id, user);
+
+    const token = createAuthToken(user);
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+  }
+
+  // Fallback to in-memory
   const user = usersByEmail.get(email);
 
   if (!user) {
@@ -335,7 +406,22 @@ app.get(`${API_PREFIX}/graph/search`, (req, res) => {
   res.json({ query: safeString(req.query?.q), results: [] });
 });
 
-app.get(`${API_PREFIX}/graph/students`, (req, res) => {
+app.get(`${API_PREFIX}/graph/students`, async (req, res) => {
+  if (supabase) {
+    const { data: students, error } = await supabase
+      .from('students')
+      .select('id, name, email')
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('Failed to fetch students:', error);
+      return res.status(500).json({ error: 'Failed to fetch students' });
+    }
+    
+    return res.json({ students: students || [] });
+  }
+
+  // Fallback to in-memory
   const students = [...usersByEmail.values()].map((user) => ({
     id: user.id,
     name: user.name,

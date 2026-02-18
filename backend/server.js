@@ -161,11 +161,279 @@ const toRepoSummary = (repo, languageMap, commitCount) => ({
   pushedAt: repo.pushed_at
 });
 
-const getGithubTokenForUser = (userId) => {
+const getGithubTokenForUser = async (userId) => {
+  // First check in-memory cache
   const oauthToken = githubTokensByUserId.get(userId);
   if (oauthToken && oauthToken.accessToken) return oauthToken.accessToken;
+  
+  // Then check database
+  if (supabase) {
+    const { data } = await supabase
+      .from('integration_accounts')
+      .select('access_token')
+      .eq('student_id', userId)
+      .eq('provider', 'github')
+      .single();
+    
+    if (data?.access_token) {
+      // Cache it in memory for performance
+      githubTokensByUserId.set(userId, { accessToken: data.access_token });
+      return data.access_token;
+    }
+  }
+  
   if (GITHUB_STATIC_TOKEN) return GITHUB_STATIC_TOKEN;
   return '';
+};
+
+// Helper to store or update integration account in database
+const saveIntegrationAccount = async (studentId, provider, data) => {
+  if (!supabase) return null;
+  
+  // Check if account already exists
+  const { data: existing } = await supabase
+    .from('integration_accounts')
+    .select('id')
+    .eq('student_id', studentId)
+    .eq('provider', provider)
+    .single();
+  
+  if (existing) {
+    // Update existing
+    const { data: updated, error } = await supabase
+      .from('integration_accounts')
+      .update({
+        access_token: data.accessToken,
+        external_user_id: data.externalUserId,
+        external_username: data.externalUsername,
+        scopes: data.scopes ? data.scopes.split(',') : [],
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', existing.id)
+      .select()
+      .single();
+    
+    if (error) console.error('Error updating integration account:', error);
+    return updated;
+  } else {
+    // Insert new
+    const { data: inserted, error } = await supabase
+      .from('integration_accounts')
+      .insert({
+        student_id: studentId,
+        provider,
+        access_token: data.accessToken,
+        external_user_id: data.externalUserId,
+        external_username: data.externalUsername,
+        scopes: data.scopes ? data.scopes.split(',') : [],
+        connected_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    
+    if (error) console.error('Error inserting integration account:', error);
+    return inserted;
+  }
+};
+
+// Helper to create or get a skill by name
+const getOrCreateSkill = async (skillName) => {
+  if (!supabase || !skillName) return null;
+  
+  const name = skillName.toLowerCase().trim();
+  
+  // Try to find existing
+  const { data: existing } = await supabase
+    .from('skills')
+    .select('id, name')
+    .eq('name', name)
+    .single();
+  
+  if (existing) return existing;
+  
+  // Create new
+  const { data: created, error } = await supabase
+    .from('skills')
+    .insert({ name })
+    .select('id, name')
+    .single();
+  
+  if (error && error.code === '23505') {
+    // Unique constraint - try to fetch again
+    const { data } = await supabase.from('skills').select('id, name').eq('name', name).single();
+    return data;
+  }
+  
+  return created;
+};
+
+// Helper to persist GitHub repos and related data
+const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, inferredSkills) => {
+  if (!supabase) return { savedRepos: 0, savedSkills: 0 };
+  
+  let savedRepos = 0;
+  let savedSkills = 0;
+  
+  // Save each repository
+  for (const repo of repos) {
+    try {
+      const repoData = {
+        student_id: studentId,
+        github_repo_id: repo.id,
+        name: repo.name,
+        full_name: repo.full_name,
+        description: repo.description || '',
+        html_url: repo.html_url,
+        is_private: repo.private || false,
+        default_branch: repo.default_branch,
+        language: repo.language,
+        topics: Array.isArray(repo.topics) ? repo.topics.join(',') : '',
+        stars: repo.stargazers_count || 0,
+        forks: repo.forks_count || 0,
+        watchers: repo.watchers_count || 0,
+        open_issues: repo.open_issues_count || 0,
+        pushed_at: repo.pushed_at,
+        repo_updated_at: repo.updated_at,
+        last_synced_at: new Date().toISOString(),
+        raw: repo
+      };
+      
+      // Check if repo already exists
+      const { data: existingRepo } = await supabase
+        .from('github_repos')
+        .select('id')
+        .eq('student_id', studentId)
+        .eq('github_repo_id', repo.id)
+        .single();
+      
+      let savedRepo;
+      if (existingRepo) {
+        const { data } = await supabase
+          .from('github_repos')
+          .update(repoData)
+          .eq('id', existingRepo.id)
+          .select('id')
+          .single();
+        savedRepo = data;
+      } else {
+        const { data } = await supabase
+          .from('github_repos')
+          .insert(repoData)
+          .select('id')
+          .single();
+        savedRepo = data;
+      }
+      
+      if (savedRepo) {
+        savedRepos++;
+        const repoDetail = repoDetailsMap.get(repo.id);
+        
+        // Save languages
+        if (repoDetail?.languages && typeof repoDetail.languageBytes === 'object') {
+          for (const [lang, bytes] of Object.entries(repoDetail.languageBytes)) {
+            await supabase
+              .from('github_repo_languages')
+              .upsert({
+                repo_id: savedRepo.id,
+                language: lang,
+                bytes: bytes || 0
+              }, { onConflict: 'repo_id,language' });
+          }
+        }
+        
+        // Save topics
+        if (Array.isArray(repo.topics)) {
+          for (const topic of repo.topics) {
+            await supabase
+              .from('github_repo_topics')
+              .upsert({
+                repo_id: savedRepo.id,
+                topic: topic
+              }, { onConflict: 'repo_id,topic' });
+          }
+        }
+        
+        // Save commits
+        if (repoDetail?.commits && Array.isArray(repoDetail.commits)) {
+          for (const commit of repoDetail.commits) {
+            const commitData = {
+              repo_id: savedRepo.id,
+              sha: commit.sha,
+              author_login: commit.author?.login || commit.commit?.author?.name,
+              author_email: commit.commit?.author?.email,
+              message: commit.commit?.message,
+              commit_url: commit.html_url,
+              committed_at: commit.commit?.author?.date,
+              raw: commit
+            };
+            
+            // Check if commit exists
+            const { data: existingCommit } = await supabase
+              .from('github_commits')
+              .select('id')
+              .eq('repo_id', savedRepo.id)
+              .eq('sha', commit.sha)
+              .single();
+            
+            if (!existingCommit) {
+              await supabase.from('github_commits').insert(commitData);
+            }
+          }
+        }
+      }
+    } catch (repoError) {
+      console.error(`Error saving repo ${repo.name}:`, repoError);
+    }
+  }
+  
+  // Save inferred skills
+  for (const skillData of inferredSkills) {
+    const skill = await getOrCreateSkill(skillData.skill);
+    if (skill) savedSkills++;
+  }
+  
+  return { savedRepos, savedSkills };
+};
+
+// Helper to create a sync run record
+const createSyncRun = async (studentId, provider, status, message = null, details = {}) => {
+  if (!supabase) return null;
+  
+  const { data, error } = await supabase
+    .from('sync_runs')
+    .insert({
+      student_id: studentId,
+      provider,
+      status,
+      message,
+      details,
+      started_at: new Date().toISOString(),
+      finished_at: status === 'success' || status === 'failed' ? new Date().toISOString() : null
+    })
+    .select()
+    .single();
+  
+  if (error) console.error('Error creating sync run:', error);
+  return data;
+};
+
+const updateSyncRun = async (syncRunId, status, message = null, details = {}) => {
+  if (!supabase || !syncRunId) return null;
+  
+  const { data, error } = await supabase
+    .from('sync_runs')
+    .update({
+      status,
+      message,
+      details,
+      finished_at: new Date().toISOString()
+    })
+    .eq('id', syncRunId)
+    .select()
+    .single();
+  
+  if (error) console.error('Error updating sync run:', error);
+  return data;
 };
 
 app.get(`${API_PREFIX}/health`, (req, res) => {
@@ -307,7 +575,7 @@ app.post(`${API_PREFIX}/graph/certifications`, authGuard, (req, res) => {
 });
 
 app.get(`${API_PREFIX}/integrations/health`, authGuard, async (req, res) => {
-  const token = getGithubTokenForUser(req.user.id);
+  const token = await getGithubTokenForUser(req.user.id);
   const github = {
     configured: Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && GITHUB_REDIRECT_URI),
     hasToken: Boolean(token),
@@ -421,11 +689,32 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
       return res.status(502).json({ error: 'GitHub did not return an access token' });
     }
 
+    const scope = safeString(tokenResponse.data?.scope);
+    
+    // Store in memory cache
     githubTokensByUserId.set(pendingState.userId, {
       accessToken,
       tokenType: safeString(tokenResponse.data?.token_type) || 'bearer',
-      scope: safeString(tokenResponse.data?.scope),
+      scope,
       createdAt: Date.now()
+    });
+
+    // Fetch GitHub user info to store external_user_id and username
+    let githubUserInfo = null;
+    try {
+      const ghClient = githubClient(accessToken);
+      const { data } = await ghClient.get('/user');
+      githubUserInfo = data;
+    } catch (e) {
+      console.warn('Could not fetch GitHub user info:', e.message);
+    }
+
+    // Store in database
+    await saveIntegrationAccount(pendingState.userId, 'github', {
+      accessToken,
+      externalUserId: githubUserInfo?.id?.toString(),
+      externalUsername: githubUserInfo?.login,
+      scopes: scope
     });
 
     pendingGithubStates.delete(state);
@@ -517,47 +806,59 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
   }
 });
 
-const runGithubSync = async ({ token, limit, includePrivate }) => {
+const runGithubSync = async ({ token, limit, includePrivate, studentId }) => {
   const perPage = Math.min(Math.max(Number(limit) || 30, 1), 100);
   const visibility = includePrivate ? 'all' : 'public';
   const client = githubClient(token);
 
-  const [meRes, reposRes] = await Promise.all([
-    client.get('/user'),
-    client.get('/user/repos', {
-      params: {
-        sort: 'updated',
-        direction: 'desc',
-        per_page: perPage,
-        visibility,
-        affiliation: 'owner,collaborator,organization_member'
-      }
-    })
-  ]);
+  // Create sync run record
+  const syncRun = await createSyncRun(studentId, 'github', 'running', 'Fetching GitHub data...');
 
-  const repos = Array.isArray(reposRes.data) ? reposRes.data : [];
+  try {
+    const [meRes, reposRes] = await Promise.all([
+      client.get('/user'),
+      client.get('/user/repos', {
+        params: {
+          sort: 'updated',
+          direction: 'desc',
+          per_page: perPage,
+          visibility,
+          affiliation: 'owner,collaborator,organization_member'
+        }
+      })
+    ]);
 
-  const repoDetails = await Promise.all(
-    repos.map(async (repo) => {
-      try {
-        const [languagesRes, commitsRes] = await Promise.all([
-          client.get(`/repos/${repo.owner.login}/${repo.name}/languages`),
-          client.get(`/repos/${repo.owner.login}/${repo.name}/commits`, { params: { per_page: 10 } })
-        ]);
+    const repos = Array.isArray(reposRes.data) ? reposRes.data : [];
+    const repoDetailsMap = new Map();
 
-        const languages = languagesRes.data || {};
-        const commitCount = Array.isArray(commitsRes.data) ? commitsRes.data.length : 0;
-        return toRepoSummary(repo, languages, commitCount);
-      } catch (error) {
-        return toRepoSummary(repo, {}, 0);
-      }
-    })
-  );
+    const repoDetails = await Promise.all(
+      repos.map(async (repo) => {
+        try {
+          const [languagesRes, commitsRes] = await Promise.all([
+            client.get(`/repos/${repo.owner.login}/${repo.name}/languages`),
+            client.get(`/repos/${repo.owner.login}/${repo.name}/commits`, { params: { per_page: 10 } })
+          ]);
 
-  const inferredSkills = inferSkills(repoDetails);
+          const languages = languagesRes.data || {};
+          const commits = Array.isArray(commitsRes.data) ? commitsRes.data : [];
+          
+          // Store raw data for persistence
+          repoDetailsMap.set(repo.id, {
+            languages: Object.keys(languages),
+            languageBytes: languages,
+            commits: commits
+          });
 
-  return {
-    githubUser: {
+          return toRepoSummary(repo, languages, commits.length);
+        } catch (error) {
+          repoDetailsMap.set(repo.id, { languages: [], languageBytes: {}, commits: [] });
+          return toRepoSummary(repo, {}, 0);
+        }
+      })
+    );
+
+    const inferredSkills = inferSkills(repoDetails);
+    const githubUser = {
       id: meRes.data?.id,
       login: meRes.data?.login,
       name: meRes.data?.name,
@@ -566,18 +867,43 @@ const runGithubSync = async ({ token, limit, includePrivate }) => {
       publicRepos: meRes.data?.public_repos,
       followers: meRes.data?.followers,
       following: meRes.data?.following
-    },
-    repositories: repoDetails,
-    inferredSkills,
-    totals: {
-      repositories: repoDetails.length,
-      inferredSkills: inferredSkills.length
+    };
+
+    // Persist data to Supabase
+    let dbStats = { savedRepos: 0, savedSkills: 0 };
+    if (studentId) {
+      dbStats = await persistGithubData(studentId, githubUser, repos, repoDetailsMap, inferredSkills);
     }
-  };
+
+    // Update sync run as success
+    await updateSyncRun(syncRun?.id, 'success', 'GitHub sync completed successfully', {
+      reposFound: repos.length,
+      reposSaved: dbStats.savedRepos,
+      skillsFound: inferredSkills.length,
+      skillsSaved: dbStats.savedSkills
+    });
+
+    return {
+      githubUser,
+      repositories: repoDetails,
+      inferredSkills,
+      totals: {
+        repositories: repoDetails.length,
+        inferredSkills: inferredSkills.length
+      },
+      dbStats
+    };
+  } catch (error) {
+    // Update sync run as failed
+    await updateSyncRun(syncRun?.id, 'failed', error.message || 'GitHub sync failed', {
+      error: error.response?.data || error.message
+    });
+    throw error;
+  }
 };
 
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
-  const token = getGithubTokenForUser(req.user.id);
+  const token = await getGithubTokenForUser(req.user.id);
   if (!token) {
     return res.status(400).json({
       error: 'No GitHub token found. Connect OAuth first or set GITHUB_TOKEN in .env'
@@ -589,7 +915,12 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
   const limit = Number(req.body?.limit) || 30;
 
   try {
-    const syncPayload = await runGithubSync({ token, limit, includePrivate });
+    const syncPayload = await runGithubSync({ 
+      token, 
+      limit, 
+      includePrivate, 
+      studentId: req.user.id 
+    });
     return res.json({
       provider: 'github',
       studentName,
@@ -606,7 +937,7 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
 });
 
 app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) => {
-  const token = GITHUB_STATIC_TOKEN || getGithubTokenForUser(req.user.id);
+  const token = GITHUB_STATIC_TOKEN || await getGithubTokenForUser(req.user.id);
   if (!token) {
     return res.status(400).json({ error: 'Set GITHUB_TOKEN in .env or connect OAuth first' });
   }
@@ -616,7 +947,12 @@ app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) =
   const limit = Number(req.body?.limit) || 30;
 
   try {
-    const syncPayload = await runGithubSync({ token, limit, includePrivate });
+    const syncPayload = await runGithubSync({ 
+      token, 
+      limit, 
+      includePrivate, 
+      studentId: req.user.id 
+    });
     return res.json({
       provider: 'github',
       studentName,

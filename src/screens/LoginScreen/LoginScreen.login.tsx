@@ -3,6 +3,7 @@ import { View, StyleSheet, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LoginForm } from '@/components/LoginForm/LoginForm.login';
 import { LoginCredentials } from '@/utils/loginValidators';
+import { api } from '@/services/api';
 
 interface LoginScreenProps {
   onNavigateToForgotPassword?: () => void;
@@ -20,13 +21,10 @@ export const LoginScreenComponent: React.FC<LoginScreenProps> = ({
   const handleLogin = async (credentials: LoginCredentials) => {
     setIsLoading(true);
     try {
-      // TODO: Replace with actual API call when backend is provided
-      console.log('Login attempt with:', {
-        email: credentials.email,
-      });
-
-      // Simulate API delay
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Call actual API
+      const response = await api.login(credentials.email, credentials.password);
+      
+      console.log('Login successful:', response.user.email);
 
       if (onLoginSuccess) {
         onLoginSuccess();

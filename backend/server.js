@@ -8,8 +8,21 @@ const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
+
+// Initialize Supabase client
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  console.log('Supabase client initialized successfully');
+} else {
+  console.warn('WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set. Database features disabled.');
+}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -23,9 +36,7 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || '';
 const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
 
-// Demo in-memory stores. Replace with persistent DB tables in production.
-const usersByEmail = new Map();
-const usersById = new Map();
+// Temporary in-memory stores for OAuth state (short-lived, don't need DB)
 const pendingGithubStates = new Map();
 const githubTokensByUserId = new Map();
 
@@ -174,43 +185,85 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
     return res.status(400).json({ error: 'name, email, and password are required' });
   }
 
-  if (usersByEmail.has(email)) {
-    return res.status(409).json({ error: 'User already exists' });
+  if (!supabase) {
+    return res.status(500).json({ error: 'Database not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' });
   }
 
-  const user = {
-    id: crypto.randomUUID(),
-    name,
-    email,
-    passwordHash: await bcrypt.hash(password, 10)
-  };
+  try {
+    // Check if user already exists by email
+    const { data: existingUser } = await supabase
+      .from('students')
+      .select('id')
+      .eq('email', email)
+      .single();
 
-  usersByEmail.set(email, user);
-  usersById.set(user.id, user);
+    if (existingUser) {
+      return res.status(409).json({ error: 'User already exists' });
+    }
 
-  const token = createAuthToken(user);
-  return res.status(201).json({
-    token,
-    user: { id: user.id, name: user.name, email: user.email }
-  });
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Insert new student into Supabase
+    const { data: newStudent, error } = await supabase
+      .from('students')
+      .insert({
+        name,
+        email,
+        password_hash: passwordHash
+      })
+      .select('id, name, email')
+      .single();
+
+    if (error) {
+      console.error('Supabase register error:', error);
+      if (error.code === '23505') {
+        return res.status(409).json({ error: 'User already exists' });
+      }
+      return res.status(500).json({ error: 'Failed to create user' });
+    }
+
+    const token = createAuthToken(newStudent);
+    return res.status(201).json({
+      token,
+      user: { id: newStudent.id, name: newStudent.name, email: newStudent.email }
+    });
+  } catch (err) {
+    console.error('Register error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
   const email = safeString(req.body?.email).toLowerCase();
   const password = safeString(req.body?.password);
-  const user = usersByEmail.get(email);
 
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid credentials' });
+  if (!supabase) {
+    return res.status(500).json({ error: 'Database not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' });
   }
 
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
+  try {
+    // Fetch student from Supabase by email
+    const { data: student, error } = await supabase
+      .from('students')
+      .select('id, name, email, password_hash')
+      .eq('email', email)
+      .single();
 
-  const token = createAuthToken(user);
-  return res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+    if (error || !student) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const valid = await bcrypt.compare(password, student.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = createAuthToken(student);
+    return res.json({ token, user: { id: student.id, name: student.name, email: student.email } });
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get(`${API_PREFIX}/graph`, (req, res) => {
@@ -221,13 +274,26 @@ app.get(`${API_PREFIX}/graph/search`, (req, res) => {
   res.json({ query: safeString(req.query?.q), results: [] });
 });
 
-app.get(`${API_PREFIX}/graph/students`, (req, res) => {
-  const students = [...usersByEmail.values()].map((user) => ({
-    id: user.id,
-    name: user.name,
-    email: user.email
-  }));
-  res.json({ students });
+app.get(`${API_PREFIX}/graph/students`, async (req, res) => {
+  if (!supabase) {
+    return res.json({ students: [] });
+  }
+
+  try {
+    const { data: students, error } = await supabase
+      .from('students')
+      .select('id, name, email');
+
+    if (error) {
+      console.error('Error fetching students:', error);
+      return res.json({ students: [] });
+    }
+
+    res.json({ students: students || [] });
+  } catch (err) {
+    console.error('Get students error:', err);
+    res.json({ students: [] });
+  }
 });
 
 app.post(`${API_PREFIX}/graph/projects`, authGuard, (req, res) => {

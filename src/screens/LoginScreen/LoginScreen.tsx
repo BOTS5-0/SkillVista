@@ -1,35 +1,33 @@
 import React, { useState } from 'react';
-import { View, StyleSheet, Alert, Text, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { LoginForm } from '@/components/LoginForm/LoginForm';
-import { LoginCredentials } from '@/types/auth';
+import { LoginForm } from '@/components/LoginForm/LoginForm.login';
+import { LoginCredentials } from '@/utils/loginValidators';
+import { api } from '@/services/api';
 
-interface RegistrationScreenProps {
-  onNavigateBack?: () => void;
-  onRegistrationSuccess?: () => void;
+interface LoginScreenProps {
+  onNavigateToForgotPassword?: () => void;
+  onNavigateToSignUp?: () => void;
+  onLoginSuccess?: () => void;
 }
 
-export const LoginScreen: React.FC<RegistrationScreenProps> = ({
-  onNavigateBack,
-  onRegistrationSuccess,
+export const LoginScreenComponent: React.FC<LoginScreenProps> = ({
+  onNavigateToForgotPassword,
+  onNavigateToSignUp,
+  onLoginSuccess,
 }) => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleLogin = async (credentials: LoginCredentials) => {
     setIsLoading(true);
     try {
-      // TODO: Replace with actual API call when backend is provided
-      // For now, just simulate a successful login
-      console.log('Login attempt with:', {
-        username: credentials.username,
-        email: credentials.email,
-      });
+      // Call actual API
+      const response = await api.login(credentials.email, credentials.password);
+      
+      console.log('Login successful:', response.user.email);
 
-      // Simulate API delay
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      if (onRegistrationSuccess) {
-        onRegistrationSuccess();
+      if (onLoginSuccess) {
+        onLoginSuccess();
         return;
       }
 
@@ -37,7 +35,7 @@ export const LoginScreen: React.FC<RegistrationScreenProps> = ({
     } catch (error) {
       Alert.alert(
         'Error',
-        error instanceof Error ? error.message : 'An error occurred'
+        error instanceof Error ? error.message : 'Login failed. Please try again.'
       );
     } finally {
       setIsLoading(false);
@@ -47,15 +45,12 @@ export const LoginScreen: React.FC<RegistrationScreenProps> = ({
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
-        <LoginForm onSubmit={handleLogin} isLoading={isLoading} />
-        {onNavigateBack && (
-          <View style={styles.backButtonContainer}>
-            <Text style={styles.backText}>Already have an account? </Text>
-            <TouchableOpacity onPress={onNavigateBack}>
-              <Text style={styles.backLink}>Login</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+        <LoginForm
+          onSubmit={handleLogin}
+          isLoading={isLoading}
+          onForgotPassword={onNavigateToForgotPassword}
+          onSignUp={onNavigateToSignUp}
+        />
       </View>
     </SafeAreaView>
   );
@@ -70,19 +65,5 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     padding: 16,
-  },
-  backButtonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginTop: 16,
-  },
-  backText: {
-    fontSize: 14,
-    color: '#666',
-  },
-  backLink: {
-    fontSize: 14,
-    color: '#007AFF',
-    fontWeight: '600',
   },
 });

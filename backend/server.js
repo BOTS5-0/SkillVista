@@ -40,6 +40,9 @@ const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
 const pendingGithubStates = new Map();
 const githubTokensByUserId = new Map();
 
+// Background sync tracking (in-memory, per-user)
+const backgroundSyncStatus = new Map(); // userId -> { inProgress: boolean, lastSyncAt: Date, error: string|null }
+
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
@@ -1194,6 +1197,375 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
       </html>
     `);
   }
+});
+
+// ============================================
+// 🚀 GITHUB STATUS & BACKGROUND SYNC ENDPOINTS
+// ============================================
+
+// Quick check if GitHub is already connected (no loading, instant response)
+app.get(`${API_PREFIX}/integrations/github/status`, authGuard, async (req, res) => {
+  try {
+    const token = await getGithubTokenForUser(req.user.id);
+    const isConnected = Boolean(token);
+    
+    // Get last sync info from database
+    let lastSync = null;
+    let githubUsername = null;
+    
+    if (supabase && isConnected) {
+      // Get integration account info
+      const { data: integration } = await supabase
+        .from('integration_accounts')
+        .select('external_username, connected_at, updated_at')
+        .eq('student_id', req.user.id)
+        .eq('provider', 'github')
+        .single();
+      
+      if (integration) {
+        githubUsername = integration.external_username;
+      }
+      
+      // Get last successful sync
+      const { data: syncRun } = await supabase
+        .from('sync_runs')
+        .select('finished_at, details')
+        .eq('student_id', req.user.id)
+        .eq('provider', 'github')
+        .eq('status', 'success')
+        .order('finished_at', { ascending: false })
+        .limit(1)
+        .single();
+      
+      if (syncRun) {
+        lastSync = {
+          at: syncRun.finished_at,
+          details: syncRun.details
+        };
+      }
+    }
+    
+    // Check background sync status
+    const bgStatus = backgroundSyncStatus.get(req.user.id);
+    
+    return res.json({
+      connected: isConnected,
+      githubUsername,
+      lastSync,
+      backgroundSync: bgStatus || { inProgress: false, lastSyncAt: null, error: null }
+    });
+  } catch (err) {
+    console.error('GitHub status check error:', err);
+    return res.json({ connected: false, githubUsername: null, lastSync: null, backgroundSync: { inProgress: false } });
+  }
+});
+
+// Get cached GitHub data from database (instant, no GitHub API calls)
+app.get(`${API_PREFIX}/integrations/github/data`, authGuard, async (req, res) => {
+  if (!supabase) {
+    return res.json({ 
+      repositories: [], 
+      skills: [], 
+      projects: [],
+      githubUser: null,
+      cached: true,
+      message: 'Database not configured'
+    });
+  }
+  
+  try {
+    // Fetch all stored data in parallel
+    const [reposResult, skillsResult, projectsResult, integrationResult] = await Promise.all([
+      // GitHub repos
+      supabase
+        .from('github_repos')
+        .select(`
+          id, name, full_name, description, html_url, is_private, language, topics,
+          stars, forks, watchers, pushed_at, repo_updated_at, last_synced_at
+        `)
+        .eq('student_id', req.user.id)
+        .order('pushed_at', { ascending: false }),
+      
+      // Student skills with proficiency
+      supabase
+        .from('student_skills')
+        .select(`
+          proficiency_score, confidence_score, usage_count, last_used,
+          skill:skills(id, name)
+        `)
+        .eq('student_id', req.user.id)
+        .order('proficiency_score', { ascending: false }),
+      
+      // Projects
+      supabase
+        .from('projects')
+        .select('id, name, description, url, metadata, last_synced_at')
+        .eq('student_id', req.user.id)
+        .order('last_synced_at', { ascending: false }),
+      
+      // GitHub integration info
+      supabase
+        .from('integration_accounts')
+        .select('external_username, external_user_id')
+        .eq('student_id', req.user.id)
+        .eq('provider', 'github')
+        .single()
+    ]);
+    
+    const repositories = reposResult.data || [];
+    const skills = (skillsResult.data || []).map(s => ({
+      skill: s.skill?.name,
+      proficiencyScore: s.proficiency_score,
+      confidenceScore: s.confidence_score,
+      usageCount: s.usage_count,
+      lastUsed: s.last_used
+    }));
+    const projects = projectsResult.data || [];
+    
+    // Get GitHub user info if available
+    let githubUser = null;
+    if (integrationResult.data) {
+      githubUser = {
+        login: integrationResult.data.external_username,
+        id: integrationResult.data.external_user_id
+      };
+    }
+    
+    // Check if background sync is in progress
+    const bgStatus = backgroundSyncStatus.get(req.user.id);
+    
+    return res.json({
+      repositories,
+      skills,
+      projects,
+      githubUser,
+      totals: {
+        repositories: repositories.length,
+        skills: skills.length,
+        projects: projects.length
+      },
+      cached: true,
+      syncInProgress: bgStatus?.inProgress || false,
+      lastSyncAt: bgStatus?.lastSyncAt || null
+    });
+  } catch (err) {
+    console.error('Error fetching cached GitHub data:', err);
+    return res.status(500).json({ error: 'Failed to fetch cached data' });
+  }
+});
+
+// Trigger background sync (returns immediately, sync happens in background)
+app.post(`${API_PREFIX}/integrations/github/background-sync`, authGuard, async (req, res) => {
+  const token = await getGithubTokenForUser(req.user.id);
+  if (!token) {
+    return res.status(400).json({
+      error: 'GitHub not connected',
+      needsAuth: true
+    });
+  }
+  
+  const userId = req.user.id;
+  
+  // Check if sync is already in progress
+  const currentStatus = backgroundSyncStatus.get(userId);
+  if (currentStatus?.inProgress) {
+    return res.json({
+      started: false,
+      message: 'Sync already in progress',
+      status: currentStatus
+    });
+  }
+  
+  // Mark sync as in progress
+  backgroundSyncStatus.set(userId, {
+    inProgress: true,
+    startedAt: new Date().toISOString(),
+    lastSyncAt: currentStatus?.lastSyncAt || null,
+    error: null
+  });
+  
+  // Return immediately to client
+  res.json({
+    started: true,
+    message: 'Background sync started',
+    status: backgroundSyncStatus.get(userId)
+  });
+  
+  // Run sync in background (don't await)
+  const includePrivate = Boolean(req.body?.includePrivate);
+  const limit = Number(req.body?.limit) || 50;
+  
+  runGithubSync({
+    token,
+    limit,
+    includePrivate,
+    studentId: userId
+  })
+    .then(() => {
+      backgroundSyncStatus.set(userId, {
+        inProgress: false,
+        lastSyncAt: new Date().toISOString(),
+        error: null
+      });
+      console.log(`Background sync completed for user ${userId}`);
+    })
+    .catch((error) => {
+      backgroundSyncStatus.set(userId, {
+        inProgress: false,
+        lastSyncAt: backgroundSyncStatus.get(userId)?.lastSyncAt || null,
+        error: error.message || 'Sync failed'
+      });
+      console.error(`Background sync failed for user ${userId}:`, error.message);
+    });
+});
+
+// Get background sync status
+app.get(`${API_PREFIX}/integrations/github/sync-status`, authGuard, (req, res) => {
+  const status = backgroundSyncStatus.get(req.user.id) || {
+    inProgress: false,
+    lastSyncAt: null,
+    error: null
+  };
+  return res.json(status);
+});
+
+// 🔥 APP STARTUP ENDPOINT: Check connection, return cached data, auto-sync if needed
+// Call this when app opens - it returns immediately with cached data and syncs in background
+app.get(`${API_PREFIX}/integrations/github/auto-sync`, authGuard, async (req, res) => {
+  const userId = req.user.id;
+  const token = await getGithubTokenForUser(userId);
+  
+  // If not connected, return early
+  if (!token) {
+    return res.json({
+      connected: false,
+      needsAuth: true,
+      repositories: [],
+      skills: [],
+      projects: [],
+      githubUser: null
+    });
+  }
+  
+  // Get cached data from database immediately
+  let repositories = [];
+  let skills = [];
+  let projects = [];
+  let githubUser = null;
+  
+  if (supabase) {
+    try {
+      const [reposResult, skillsResult, projectsResult, integrationResult] = await Promise.all([
+        supabase
+          .from('github_repos')
+          .select('id, name, full_name, description, html_url, is_private, language, topics, stars, forks, pushed_at')
+          .eq('student_id', userId)
+          .order('pushed_at', { ascending: false }),
+        
+        supabase
+          .from('student_skills')
+          .select('proficiency_score, confidence_score, usage_count, last_used, skill:skills(id, name)')
+          .eq('student_id', userId)
+          .order('proficiency_score', { ascending: false }),
+        
+        supabase
+          .from('projects')
+          .select('id, name, description, url, metadata')
+          .eq('student_id', userId)
+          .order('last_synced_at', { ascending: false }),
+        
+        supabase
+          .from('integration_accounts')
+          .select('external_username, external_user_id')
+          .eq('student_id', userId)
+          .eq('provider', 'github')
+          .single()
+      ]);
+      
+      repositories = reposResult.data || [];
+      skills = (skillsResult.data || []).map(s => ({
+        skill: s.skill?.name,
+        proficiencyScore: s.proficiency_score,
+        confidenceScore: s.confidence_score,
+        usageCount: s.usage_count,
+        lastUsed: s.last_used
+      }));
+      projects = projectsResult.data || [];
+      
+      if (integrationResult.data) {
+        githubUser = {
+          login: integrationResult.data.external_username,
+          id: integrationResult.data.external_user_id
+        };
+      }
+    } catch (err) {
+      console.error('Error fetching cached data for auto-sync:', err);
+    }
+  }
+  
+  // Check if we should trigger background sync
+  const currentStatus = backgroundSyncStatus.get(userId);
+  const lastSyncTime = currentStatus?.lastSyncAt ? new Date(currentStatus.lastSyncAt) : null;
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+  
+  let syncTriggered = false;
+  
+  // Trigger sync if: not already running AND (never synced OR last sync > 5 min ago)
+  if (!currentStatus?.inProgress && (!lastSyncTime || lastSyncTime < fiveMinutesAgo)) {
+    syncTriggered = true;
+    
+    // Mark sync as in progress
+    backgroundSyncStatus.set(userId, {
+      inProgress: true,
+      startedAt: new Date().toISOString(),
+      lastSyncAt: currentStatus?.lastSyncAt || null,
+      error: null
+    });
+    
+    // Run sync in background (don't await)
+    runGithubSync({
+      token,
+      limit: 50,
+      includePrivate: true,
+      studentId: userId
+    })
+      .then(() => {
+        backgroundSyncStatus.set(userId, {
+          inProgress: false,
+          lastSyncAt: new Date().toISOString(),
+          error: null
+        });
+        console.log(`Auto background sync completed for user ${userId}`);
+      })
+      .catch((error) => {
+        backgroundSyncStatus.set(userId, {
+          inProgress: false,
+          lastSyncAt: backgroundSyncStatus.get(userId)?.lastSyncAt || null,
+          error: error.message || 'Sync failed'
+        });
+        console.error(`Auto background sync failed for user ${userId}:`, error.message);
+      });
+  }
+  
+  // Return cached data immediately
+  return res.json({
+    connected: true,
+    needsAuth: false,
+    repositories,
+    skills,
+    projects,
+    githubUser,
+    totals: {
+      repositories: repositories.length,
+      skills: skills.length,
+      projects: projects.length
+    },
+    syncStatus: {
+      triggered: syncTriggered,
+      inProgress: currentStatus?.inProgress || syncTriggered,
+      lastSyncAt: currentStatus?.lastSyncAt || null
+    }
+  });
 });
 
 const runGithubSync = async ({ token, limit, includePrivate, studentId }) => {

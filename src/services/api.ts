@@ -147,6 +147,74 @@ class SkillVistaAPI {
     });
   }
 
+  // 🚀 NEW: Quick check if GitHub is already connected (instant, no loading needed)
+  async checkGitHubStatus(): Promise<{
+    connected: boolean;
+    githubUsername: string | null;
+    lastSync: { at: string; details: any } | null;
+    backgroundSync: { inProgress: boolean; lastSyncAt: string | null; error: string | null };
+  }> {
+    return this.request('/integrations/github/status', {
+      method: 'GET',
+    });
+  }
+
+  // 🚀 NEW: Get cached GitHub data from database (instant, no GitHub API calls)
+  async getGitHubData(): Promise<{
+    repositories: any[];
+    skills: any[];
+    projects: any[];
+    githubUser: { login: string; id: string } | null;
+    totals: { repositories: number; skills: number; projects: number };
+    cached: boolean;
+    syncInProgress: boolean;
+    lastSyncAt: string | null;
+  }> {
+    return this.request('/integrations/github/data', {
+      method: 'GET',
+    });
+  }
+
+  // 🚀 NEW: Trigger background sync (returns immediately, sync happens in background)
+  async triggerBackgroundSync(includePrivate = true, limit = 50): Promise<{
+    started: boolean;
+    message: string;
+    status: { inProgress: boolean; lastSyncAt: string | null };
+  }> {
+    return this.request('/integrations/github/background-sync', {
+      method: 'POST',
+      body: JSON.stringify({ includePrivate, limit }),
+    });
+  }
+
+  // 🚀 NEW: Get background sync status (poll this to check if sync completed)
+  async getGitHubSyncStatus(): Promise<{
+    inProgress: boolean;
+    lastSyncAt: string | null;
+    error: string | null;
+  }> {
+    return this.request('/integrations/github/sync-status', {
+      method: 'GET',
+    });
+  }
+
+  // 🚀 NEW: App startup - checks connection, returns cached data, auto-syncs if needed
+  // Call this when app opens for seamless experience
+  async autoSyncGitHub(): Promise<{
+    connected: boolean;
+    needsAuth: boolean;
+    repositories: any[];
+    skills: any[];
+    projects: any[];
+    githubUser: { login: string; id: string } | null;
+    totals?: { repositories: number; skills: number; projects: number };
+    syncStatus?: { triggered: boolean; inProgress: boolean; lastSyncAt: string | null };
+  }> {
+    return this.request('/integrations/github/auto-sync', {
+      method: 'GET',
+    });
+  }
+
   async syncGitHubRepos(includePrivate = false, limit = 30): Promise<GitHubSyncResponse> {
     return this.request('/integrations/github/sync', {
       method: 'POST',

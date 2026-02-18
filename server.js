@@ -8,8 +8,16 @@ const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
+
+// Initialize Supabase client
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  : null;
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -27,7 +35,7 @@ const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
 const usersByEmail = new Map();
 const usersById = new Map();
 const pendingGithubStates = new Map();
-const githubTokensByUserId = new Map();
+const githubTokensByUserId = new Map(); // fallback if Supabase not configured
 
 app.use(helmet());
 app.use(cors());
@@ -150,11 +158,117 @@ const toRepoSummary = (repo, languageMap, commitCount) => ({
   pushedAt: repo.pushed_at
 });
 
-const getGithubTokenForUser = (userId) => {
+const getGithubTokenForUser = async (userId) => {
+  // First try Supabase if configured
+  if (supabase) {
+    const user = usersById.get(userId);
+    if (user?.email) {
+      // Find student by email
+      const { data: student } = await supabase
+        .from('students')
+        .select('id')
+        .eq('email', user.email)
+        .single();
+      
+      if (student) {
+        // Get GitHub token from integration_accounts
+        const { data: integration } = await supabase
+          .from('integration_accounts')
+          .select('access_token')
+          .eq('student_id', student.id)
+          .eq('provider', 'github')
+          .single();
+        
+        if (integration?.access_token) {
+          return integration.access_token;
+        }
+      }
+    }
+  }
+  
+  // Fallback to in-memory storage
   const oauthToken = githubTokensByUserId.get(userId);
   if (oauthToken && oauthToken.accessToken) return oauthToken.accessToken;
   if (GITHUB_STATIC_TOKEN) return GITHUB_STATIC_TOKEN;
   return '';
+};
+
+// Helper to save GitHub token to Supabase
+const saveGithubToken = async (userId, tokenData, githubUser) => {
+  // Always save to in-memory as fallback
+  githubTokensByUserId.set(userId, tokenData);
+  
+  if (!supabase) return;
+  
+  const user = usersById.get(userId);
+  if (!user?.email) return;
+  
+  try {
+    // Find or create student
+    let { data: student } = await supabase
+      .from('students')
+      .select('id')
+      .eq('email', user.email)
+      .single();
+    
+    if (!student) {
+      // Create student record
+      const { data: newStudent, error } = await supabase
+        .from('students')
+        .insert({ name: user.name, email: user.email })
+        .select('id')
+        .single();
+      
+      if (error) {
+        console.error('Failed to create student:', error);
+        return;
+      }
+      student = newStudent;
+    }
+    
+    // Check if integration account already exists
+    const { data: existing } = await supabase
+      .from('integration_accounts')
+      .select('id')
+      .eq('student_id', student.id)
+      .eq('provider', 'github')
+      .single();
+    
+    const integrationData = {
+      student_id: student.id,
+      provider: 'github',
+      external_user_id: String(githubUser?.id || ''),
+      external_username: githubUser?.login || '',
+      access_token: tokenData.accessToken,
+      scopes: tokenData.scope ? tokenData.scope.split(',') : [],
+      updated_at: new Date().toISOString()
+    };
+    
+    let saveError;
+    if (existing) {
+      // Update existing record
+      const { error } = await supabase
+        .from('integration_accounts')
+        .update(integrationData)
+        .eq('id', existing.id);
+      saveError = error;
+    } else {
+      // Insert new record
+      integrationData.connected_at = new Date().toISOString();
+      const { error } = await supabase
+        .from('integration_accounts')
+        .insert(integrationData);
+      saveError = error;
+    }
+    
+    if (saveError) {
+      console.error('Failed to save GitHub token:', saveError);
+    } else {
+      console.log(`GitHub token saved for student ${student.id}`);
+    }
+  } catch (err) {
+    console.error('Error saving GitHub token to Supabase:', err);
+  }
 };
 
 app.get(`${API_PREFIX}/health`, (req, res) => {
@@ -241,7 +355,7 @@ app.post(`${API_PREFIX}/graph/certifications`, authGuard, (req, res) => {
 });
 
 app.get(`${API_PREFIX}/integrations/health`, authGuard, async (req, res) => {
-  const token = getGithubTokenForUser(req.user.id);
+  const token = await getGithubTokenForUser(req.user.id);
   const github = {
     configured: Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && GITHUB_REDIRECT_URI),
     hasToken: Boolean(token),
@@ -355,12 +469,34 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
       return res.status(502).json({ error: 'GitHub did not return an access token' });
     }
 
-    githubTokensByUserId.set(pendingState.userId, {
+    // Fetch GitHub user info to store with the token
+    let githubUser = null;
+    try {
+      const userResponse = await axios.get('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/vnd.github.v3+json'
+        }
+      });
+      githubUser = {
+        id: userResponse.data?.id,
+        login: userResponse.data?.login,
+        name: userResponse.data?.name,
+        avatar_url: userResponse.data?.avatar_url
+      };
+    } catch (err) {
+      console.warn('Failed to fetch GitHub user info:', err.message);
+    }
+
+    const tokenData = {
       accessToken,
       tokenType: safeString(tokenResponse.data?.token_type) || 'bearer',
       scope: safeString(tokenResponse.data?.scope),
       createdAt: Date.now()
-    });
+    };
+
+    // Save to Supabase (and in-memory fallback)
+    await saveGithubToken(pendingState.userId, tokenData, githubUser);
 
     pendingGithubStates.delete(state);
 
@@ -511,7 +647,7 @@ const runGithubSync = async ({ token, limit, includePrivate }) => {
 };
 
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
-  const token = getGithubTokenForUser(req.user.id);
+  const token = await getGithubTokenForUser(req.user.id);
   if (!token) {
     return res.status(400).json({
       error: 'No GitHub token found. Connect OAuth first or set GITHUB_TOKEN in .env'
@@ -540,7 +676,7 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
 });
 
 app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) => {
-  const token = GITHUB_STATIC_TOKEN || getGithubTokenForUser(req.user.id);
+  const token = GITHUB_STATIC_TOKEN || await getGithubTokenForUser(req.user.id);
   if (!token) {
     return res.status(400).json({ error: 'Set GITHUB_TOKEN in .env or connect OAuth first' });
   }

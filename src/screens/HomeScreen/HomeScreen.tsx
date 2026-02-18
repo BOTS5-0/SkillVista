@@ -83,11 +83,16 @@ export const HomeScreen: React.FC = () => {
         headers: { Authorization: `Bearer ${token}` }
       }).then(async response => {
         if (!response.ok) {
-          const error = await response.json();
-          if (error.needsOAuth) {
-            reject({ needsOAuth: true, message: 'GitHub not connected' });
-          } else {
-            reject(new Error(error.error || 'Sync failed'));
+          try {
+            const error = await response.json();
+            if (error.needsOAuth) {
+              reject({ needsOAuth: true, message: 'GitHub not connected' });
+            } else {
+              reject(new Error(error.error || `Server error: ${response.status}`));
+            }
+          } catch (parseError) {
+            // If response body isn't JSON, show status code
+            reject(new Error(`Server error: ${response.status} ${response.statusText}`));
           }
           return;
         }
@@ -181,7 +186,9 @@ export const HomeScreen: React.FC = () => {
         }
         
         resolve();
-      }).catch(reject);
+      }).catch((fetchError) => {
+        reject(new Error(`Failed to connect to server: ${fetchError?.message || 'Network error'}`));
+      });
     });
   };
 

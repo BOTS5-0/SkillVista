@@ -11,11 +11,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
+import { api } from '@/services/api';
 import { mockProfile } from '@/data/mockData';
-
-const AUTH_STORAGE_KEY = 'skillvista.auth.session';
 
 export const SettingsScreen: React.FC = () => {
   const router = useRouter();
@@ -43,8 +41,17 @@ export const SettingsScreen: React.FC = () => {
   };
 
   const handleLogout = async () => {
-    await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
-    router.replace('/');
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Logout',
+        style: 'destructive',
+        onPress: async () => {
+          await api.logout();
+          router.replace('/');
+        },
+      },
+    ]);
   };
 
   return (

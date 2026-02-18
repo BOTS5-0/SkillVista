@@ -1,10 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Redirect } from 'expo-router';
 import { GitHubLoginScreen } from '@/screens/GitHubLoginScreen';
-
-const AUTH_STORAGE_KEY = 'skillvista.auth.session';
+import { api } from '@/services/api';
 
 export default function Index() {
   const [isBootstrapping, setIsBootstrapping] = useState(true);
@@ -13,8 +11,8 @@ export default function Index() {
   useEffect(() => {
     const bootstrapAuth = async () => {
       try {
-        const storedSession = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-        if (storedSession === 'true') {
+        const token = await api.getStoredToken();
+        if (token) {
           setIsAuthenticated(true);
           return;
         }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -6,16 +6,50 @@ import {
   TouchableOpacity,
   Image,
   Pressable,
+  ScrollView,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { api, GitHubSyncResponse } from '@/services/api';
 import { mockProfile } from '@/data/mockData';
 
 export const HomeScreen: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [userData, setUserData] = useState<any>(null);
+  const [githubData, setGithubData] = useState<GitHubSyncResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
+
+  useFocusEffect(
+    React.useCallback(() => {
+      loadUserData();
+    }, [])
+  );
+
+  const loadUserData = async () => {
+    try {
+      const user = await api.getStoredUser();
+      setUserData(user);
+    } catch (error) {
+      console.warn('Failed to load user data', error);
+    }
+  };
+
+  const loadGitHubData = async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.syncGitHubRepos();
+      setGithubData(data);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to load GitHub data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleOpenProfile = () => {
     setIsMenuOpen(false);
@@ -44,7 +78,12 @@ export const HomeScreen: React.FC = () => {
           onPress={handleToggleMenu}
           accessibilityLabel="Open profile menu"
         >
-          <Image source={{ uri: mockProfile.avatarUrl }} style={styles.avatar} />
+          <Image
+            source={{
+              uri: userData?.avatarUrl || mockProfile.avatarUrl,
+            }}
+            style={styles.avatar}
+          />
         </TouchableOpacity>
       </View>
       {isMenuOpen && (
@@ -62,11 +101,57 @@ export const HomeScreen: React.FC = () => {
           </View>
         </View>
       )}
-      <View style={styles.content}>
-        <Text style={styles.title}>Welcome</Text>
-        <Text style={styles.subtitle}>You are logged in.</Text>
-      </View>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <View style={styles.content}>
+          <Text style={styles.title}>Welcome, {userData?.name || 'User'}!</Text>
+          <Text style={styles.subtitle}>Your learning dashboard</Text>
 
+          {!githubData && (
+            <TouchableOpacity
+              style={styles.syncButton}
+              onPress={loadGitHubData}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="logo-github" size={18} color="#fff" />
+                  <Text style={styles.syncButtonText}>Sync GitHub Profile</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {githubData && (
+            <View style={styles.statsContainer}>
+              <View style={styles.statCard}>
+                <Ionicons name="code-outline" size={24} color="#1D4ED8" />
+                <Text style={styles.statValue}>{githubData.totals.repositories}</Text>
+                <Text style={styles.statLabel}>Repositories</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Ionicons name="sparkles" size={24} color="#1D4ED8" />
+                <Text style={styles.statValue}>{githubData.totals.inferredSkills}</Text>
+                <Text style={styles.statLabel}>Skills</Text>
+              </View>
+            </View>
+          )}
+
+          {githubData?.inferredSkills && githubData.inferredSkills.length > 0 && (
+            <View style={styles.skillsContainer}>
+              <Text style={styles.sectionTitle}>Top Skills</Text>
+              <View style={styles.skillsList}>
+                {githubData.inferredSkills.slice(0, 6).map((skill, idx) => (
+                  <View key={idx} style={styles.skillBadge}>
+                    <Text style={styles.skillText}>{skill.skill}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 };
@@ -75,6 +160,9 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
+  },
+  scrollContent: {
+    flexGrow: 1,
   },
   header: {
     height: 72,
@@ -156,19 +244,98 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   content: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
     padding: 16,
   },
   title: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#111',
-    marginBottom: 8,
+    color: '#0F172A',
+    marginBottom: 4,
   },
   subtitle: {
+    fontSize: 14,
+    color: '#64748B',
+    marginBottom: 24,
+  },
+  syncButton: {
+    backgroundColor: '#1D4ED8',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 24,
+    shadowColor: '#1D4ED8',
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  syncButtonText: {
+    color: '#fff',
     fontSize: 16,
-    color: '#666',
+    fontWeight: '600',
+  },
+  statsContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 24,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  statValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginTop: 8,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 4,
+  },
+  skillsContainer: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 24,
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 12,
+  },
+  skillsList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  skillBadge: {
+    backgroundColor: '#EFF6FF',
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  skillText: {
+    fontSize: 12,
+    color: '#1D4ED8',
+    fontWeight: '600',
   },
 });

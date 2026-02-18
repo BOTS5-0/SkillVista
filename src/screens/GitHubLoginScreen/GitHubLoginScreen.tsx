@@ -6,106 +6,146 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
-  Linking,
+  TextInput,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { appEnv } from '@/config/env';
-
-const AUTH_STORAGE_KEY = 'skillvista.auth.session';
-const USER_STORAGE_KEY = 'skillvista.user.data';
-
-interface GitHubUser {
-  id: number;
-  login: string;
-  name: string;
-  avatar_url: string;
-  bio: string;
-}
+import { api } from '@/services/api';
 
 export const GitHubLoginScreen: React.FC = () => {
   const router = useRouter();
   const [isLoading, setIsLoading] = React.useState(false);
+  const [mode, setMode] = React.useState<'login' | 'register'>('login');
+  const [email, setEmail] = React.useState('');
+  const [password, setPassword] = React.useState('');
+  const [name, setName] = React.useState('');
 
-  const handleGitHubLogin = async () => {
-    if (!appEnv.GITHUB_CLIENT_ID) {
-      Alert.alert('Error', 'GitHub OAuth configuration is missing.');
+  const handleLogin = async () => {
+    if (!email.trim() || !password.trim()) {
+      Alert.alert('Error', 'Please fill in all fields');
       return;
     }
 
     setIsLoading(true);
-
     try {
-      // For development, we'll use a mock token approach
-      // In production, you'd implement a proper OAuth backend flow
-      const mockUser: GitHubUser = {
-        id: 12345,
-        login: 'skillvista-user',
-        name: 'SkillVista User',
-        avatar_url: 'https://avatars.githubusercontent.com/u/12345?v=4',
-        bio: 'An awesome learner',
-      };
-
-      const mockAccessToken =
-        appEnv.GITHUB_TOKEN || `mock_token_${Date.now()}`;
-
-      // Save auth session and user data
-      await AsyncStorage.setItem(AUTH_STORAGE_KEY, 'true');
-      await AsyncStorage.setItem(
-        USER_STORAGE_KEY,
-        JSON.stringify({
-          id: mockUser.id,
-          name: mockUser.name || mockUser.login,
-          username: mockUser.login,
-          avatarUrl: mockUser.avatar_url,
-          bio: mockUser.bio,
-          accessToken: mockAccessToken,
-        })
-      );
-
-      // Navigate to home
+      await api.login(email, password);
       router.replace('/(tabs)/dashboard');
-    } catch (error) {
-      console.error('GitHub login error:', error);
-      Alert.alert('Error', 'Failed to login with GitHub. Please try again.');
+    } catch (error: any) {
+      Alert.alert('Login Failed', error.message || 'Failed to login. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    if (!name.trim() || !email.trim() || !password.trim()) {
+      Alert.alert('Error', 'Please fill in all fields');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await api.register(name, email, password);
+      // Auto-login after registration
+      router.replace('/(tabs)/dashboard');
+    } catch (error: any) {
+      Alert.alert('Registration Failed', error.message || 'Failed to register. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
-        <View style={styles.headerSection}>
-          <Ionicons name="logo-github" size={64} color="#0F172A" />
-          <Text style={styles.title}>SkillVista</Text>
-          <Text style={styles.subtitle}>
-            Connect with GitHub to view your learning journey
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      style={{ flex: 1 }}
+    >
+      <SafeAreaView style={styles.container}>
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.headerSection}>
+            <Ionicons name="logo-github" size={64} color="#0F172A" />
+            <Text style={styles.title}>SkillVista</Text>
+            <Text style={styles.subtitle}>
+              {mode === 'login'
+                ? 'Login to view your learning journey'
+                : 'Create your account'}
+            </Text>
+          </View>
+
+          <View style={styles.formContainer}>
+            {mode === 'register' && (
+              <TextInput
+                style={styles.input}
+                placeholder="Full Name"
+                value={name}
+                onChangeText={setName}
+                editable={!isLoading}
+                placeholderTextColor="#999"
+              />
+            )}
+
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              editable={!isLoading}
+              placeholderTextColor="#999"
+            />
+
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              editable={!isLoading}
+              placeholderTextColor="#999"
+            />
+
+            <TouchableOpacity
+              style={[styles.button, isLoading && styles.buttonDisabled]}
+              onPress={mode === 'login' ? handleLogin : handleRegister}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>
+                  {mode === 'login' ? 'Login' : 'Create Account'}
+                </Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => {
+                setMode(mode === 'login' ? 'register' : 'login');
+                setEmail('');
+                setPassword('');
+                setName('');
+              }}
+              disabled={isLoading}
+            >
+              <Text style={styles.toggleText}>
+                {mode === 'login'
+                  ? "Don't have an account? Sign up"
+                  : 'Already have an account? Login'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.disclaimer}>
+            We use secure authentication to protect your data.
           </Text>
-        </View>
-
-        <TouchableOpacity
-          style={[styles.button, isLoading && styles.buttonDisabled]}
-          onPress={handleGitHubLogin}
-          disabled={isLoading}
-        >
-          {isLoading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <>
-              <Ionicons name="logo-github" size={20} color="#fff" />
-              <Text style={styles.buttonText}>Login with GitHub</Text>
-            </>
-          )}
-        </TouchableOpacity>
-
-        <Text style={styles.disclaimer}>
-          We use GitHub OAuth to securely authenticate your account.
-        </Text>
-      </View>
-    </SafeAreaView>
+        </ScrollView>
+      </SafeAreaView>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -114,15 +154,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
-  content: {
-    flex: 1,
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
-    alignItems: 'center',
     padding: 24,
   },
   headerSection: {
     alignItems: 'center',
-    marginBottom: 48,
+    marginBottom: 40,
   },
   title: {
     fontSize: 32,
@@ -137,20 +176,32 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 8,
   },
+  formContainer: {
+    marginBottom: 32,
+  },
+  input: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 12,
+    fontSize: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    color: '#0F172A',
+  },
   button: {
     backgroundColor: '#1D1D1D',
     borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 32,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
+    marginVertical: 16,
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 8,
     elevation: 4,
-    width: '100%',
   },
   buttonDisabled: {
     backgroundColor: '#cbd5e1',
@@ -160,11 +211,17 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
+  toggleText: {
+    textAlign: 'center',
+    color: '#1D4ED8',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   disclaimer: {
     fontSize: 12,
     color: '#64748B',
     textAlign: 'center',
-    marginTop: 24,
+    marginTop: 16,
     fontStyle: 'italic',
   },
 });

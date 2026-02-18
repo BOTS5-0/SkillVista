@@ -2272,6 +2272,109 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
   }
 });
 
+// SSE Streaming endpoint for progressive GitHub sync
+app.get(`${API_PREFIX}/integrations/github/sync-stream`, authGuard, async (req, res) => {
+  const token = GITHUB_STATIC_TOKEN || await getGithubTokenForUser(req.user.id);
+  if (!token) {
+    return res.status(400).json({ error: 'GitHub not connected', needsOAuth: true });
+  }
+
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const perPage = 30;
+  const client = githubClient(token);
+
+  try {
+    // Step 1: Fetch user info
+    sendEvent('status', { message: 'Fetching GitHub profile...' });
+    const meRes = await client.get('/user');
+    const githubUser = {
+      id: meRes.data?.id,
+      login: meRes.data?.login,
+      name: meRes.data?.name,
+      avatarUrl: meRes.data?.avatar_url,
+      profileUrl: meRes.data?.html_url,
+      publicRepos: meRes.data?.public_repos,
+      followers: meRes.data?.followers,
+      following: meRes.data?.following
+    };
+    sendEvent('user', githubUser);
+
+    // Step 2: Fetch repos list
+    sendEvent('status', { message: 'Fetching repository list...' });
+    const reposRes = await client.get('/user/repos', {
+      params: { sort: 'updated', direction: 'desc', per_page: perPage, visibility: 'all', affiliation: 'owner,collaborator,organization_member' }
+    });
+    const repos = Array.isArray(reposRes.data) ? reposRes.data : [];
+    sendEvent('repos_count', { total: repos.length });
+
+    // Step 3: Process each repo and stream it
+    const allRepoDetails = [];
+    const repoDetailsMap = new Map();
+    
+    for (let i = 0; i < repos.length; i++) {
+      const repo = repos[i];
+      sendEvent('status', { message: `Processing ${repo.name} (${i + 1}/${repos.length})...` });
+      
+      try {
+        const [languagesRes, commitsRes] = await Promise.all([
+          client.get(`/repos/${repo.owner.login}/${repo.name}/languages`),
+          client.get(`/repos/${repo.owner.login}/${repo.name}/commits`, { params: { per_page: 10 } })
+        ]);
+
+        const languages = languagesRes.data || {};
+        const commits = Array.isArray(commitsRes.data) ? commitsRes.data : [];
+        
+        repoDetailsMap.set(repo.id, { languages: Object.keys(languages), languageBytes: languages, commits });
+        
+        const repoSummary = toRepoSummary(repo, languages, commits.length);
+        allRepoDetails.push(repoSummary);
+        
+        // Stream each repo as it's processed
+        sendEvent('repo', { index: i, total: repos.length, repo: repoSummary });
+      } catch (error) {
+        repoDetailsMap.set(repo.id, { languages: [], languageBytes: {}, commits: [] });
+        const repoSummary = toRepoSummary(repo, {}, 0);
+        allRepoDetails.push(repoSummary);
+        sendEvent('repo', { index: i, total: repos.length, repo: repoSummary });
+      }
+    }
+
+    // Step 4: Infer skills
+    sendEvent('status', { message: 'Analyzing skills...' });
+    const inferredSkills = inferSkills(allRepoDetails);
+    sendEvent('skills', inferredSkills);
+
+    // Step 5: Persist to database
+    sendEvent('status', { message: 'Saving to database...' });
+    let dbStats = { savedRepos: 0, savedSkills: 0, savedProjects: 0, studentSkillsUpdated: 0 };
+    if (req.user.id) {
+      dbStats = await persistGithubData(req.user.id, githubUser, repos, repoDetailsMap, inferredSkills);
+    }
+
+    // Step 6: Done
+    sendEvent('complete', {
+      totals: { repositories: allRepoDetails.length, inferredSkills: inferredSkills.length },
+      dbStats
+    });
+    
+    res.end();
+  } catch (error) {
+    sendEvent('error', { message: error.message || 'GitHub sync failed' });
+    res.end();
+  }
+});
+
 app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) => {
   const token = GITHUB_STATIC_TOKEN || await getGithubTokenForUser(req.user.id);
   if (!token) {

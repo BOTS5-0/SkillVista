@@ -42,6 +42,9 @@ const usersById = new Map();
 const pendingGithubStates = new Map();
 const githubTokensByUserId = new Map(); // fallback if Supabase not configured
 
+// Trust proxy for Render (needed for rate limiting behind reverse proxy)
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(cors());
 app.use(express.json());

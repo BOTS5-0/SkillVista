@@ -19,6 +19,11 @@ const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
   : null;
 
+console.log('=== SkillVista Backend Starting ===');
+console.log('Supabase configured:', Boolean(supabase));
+console.log('SUPABASE_URL set:', Boolean(SUPABASE_URL));
+console.log('SUPABASE_SERVICE_ROLE_KEY set:', Boolean(SUPABASE_SERVICE_KEY));
+
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 const API_PREFIX = '/api';
@@ -303,18 +308,24 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
   const email = safeString(req.body?.email).toLowerCase();
   const password = safeString(req.body?.password);
 
+  console.log('Register attempt:', { name, email, supabaseConfigured: Boolean(supabase) });
+
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'name, email, and password are required' });
   }
 
   // Check if Supabase is configured
   if (supabase) {
+    console.log('Using Supabase for registration');
+    
     // Check if user exists in Supabase
-    const { data: existing } = await supabase
+    const { data: existing, error: checkError } = await supabase
       .from('students')
       .select('id')
       .eq('email', email)
       .single();
+    
+    console.log('Existing user check:', { existing, checkError: checkError?.message });
     
     if (existing) {
       return res.status(409).json({ error: 'User already exists' });
@@ -328,9 +339,11 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
       .select('id, name, email')
       .single();
     
+    console.log('Insert result:', { newStudent, error: error?.message });
+    
     if (error) {
       console.error('Supabase register error:', error);
-      return res.status(500).json({ error: 'Failed to create user' });
+      return res.status(500).json({ error: 'Failed to create user', details: error.message });
     }
 
     // Also cache in memory for token operations

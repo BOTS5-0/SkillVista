@@ -1122,10 +1122,17 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
     let authUserId = student.auth_user_id;
     if (!authUserId) {
       authUserId = crypto.randomUUID();
-      await supabase
+      console.log('Generating auth_user_id for user:', student.id, 'UUID:', authUserId);
+      const { error: updateError } = await supabase
         .from('students')
         .update({ auth_user_id: authUserId })
         .eq('id', student.id);
+      
+      if (updateError) {
+        console.error('Failed to update auth_user_id:', updateError);
+      } else {
+        console.log('Successfully updated auth_user_id for user:', student.id);
+      }
     }
 
     const token = createAuthToken(student);

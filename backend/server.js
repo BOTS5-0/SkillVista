@@ -813,9 +813,15 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
             metadata: {
               stars: repo.stargazers_count,
               forks: repo.forks_count,
+              watchers: repo.watchers_count,
               language: repo.language,
               topics: repo.topics,
-              private: repo.private
+              private: repo.private,
+              pushed_at: repo.pushed_at,
+              created_at: repo.created_at,
+              open_issues: repo.open_issues_count,
+              default_branch: repo.default_branch,
+              full_name: repo.full_name
             }
           });
           
@@ -1386,10 +1392,10 @@ app.get(`${API_PREFIX}/integrations/github/data`, authGuard, async (req, res) =>
         .eq('student_id', req.user.id)
         .order('proficiency_score', { ascending: false }),
       
-      // Projects
+      // Projects with linked skills
       supabase
         .from('projects')
-        .select('id, name, description, url, metadata, last_synced_at')
+        .select('id, name, description, url, metadata, last_synced_at, project_skills(skill:skills(name))')
         .eq('student_id', req.user.id)
         .order('last_synced_at', { ascending: false }),
       

@@ -96,6 +96,10 @@ export const HomeScreen: React.FC = () => {
     router.push('/settings');
   };
 
+  const handleOpenProjects = () => {
+    router.push('/projects');
+  };
+
   const handleToggleMenu = () => {
     setIsMenuOpen((prev) => !prev);
   };
@@ -186,6 +190,14 @@ export const HomeScreen: React.FC = () => {
               </View>
             </View>
           )}
+
+          <TouchableOpacity
+            style={styles.projectsButton}
+            onPress={handleOpenProjects}
+          >
+            <Ionicons name="folder-outline" size={18} color="#fff" />
+            <Text style={styles.projectsButtonText}>View Projects</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -372,6 +384,26 @@ const styles = StyleSheet.create({
   skillText: {
     fontSize: 12,
     color: '#1D4ED8',
+    fontWeight: '600',
+  },
+  projectsButton: {
+    backgroundColor: '#059669',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 16,
+    shadowColor: '#059669',
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  projectsButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
   },
 });

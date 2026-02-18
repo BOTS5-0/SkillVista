@@ -267,12 +267,244 @@ const getOrCreateSkill = async (skillName) => {
   return created;
 };
 
-// Helper to persist GitHub repos and related data
+// Helper to get or create a source (github, notion, certification, manual, other)
+const getOrCreateSource = async (sourceName, kind) => {
+  if (!supabase || !sourceName) return null;
+  
+  const name = sourceName.toLowerCase().trim();
+  
+  const { data: existing } = await supabase
+    .from('sources')
+    .select('id, name, kind')
+    .eq('name', name)
+    .single();
+  
+  if (existing) return existing;
+  
+  const { data: created, error } = await supabase
+    .from('sources')
+    .insert({ name, kind })
+    .select('id, name, kind')
+    .single();
+  
+  if (error && error.code === '23505') {
+    const { data } = await supabase.from('sources').select('id, name, kind').eq('name', name).single();
+    return data;
+  }
+  
+  return created;
+};
+
+// Helper to get or create a technology
+const getOrCreateTechnology = async (techName) => {
+  if (!supabase || !techName) return null;
+  
+  const name = techName.toLowerCase().trim();
+  
+  const { data: existing } = await supabase
+    .from('technologies')
+    .select('id, name')
+    .eq('name', name)
+    .single();
+  
+  if (existing) return existing;
+  
+  const { data: created, error } = await supabase
+    .from('technologies')
+    .insert({ name })
+    .select('id, name')
+    .single();
+  
+  if (error && error.code === '23505') {
+    const { data } = await supabase.from('technologies').select('id, name').eq('name', name).single();
+    return data;
+  }
+  
+  return created;
+};
+
+// Helper to create or update a project from external source
+const createOrUpdateProject = async (studentId, sourceId, projectData) => {
+  if (!supabase) return null;
+  
+  // Check if project exists by source_external_id
+  const { data: existing } = await supabase
+    .from('projects')
+    .select('id')
+    .eq('student_id', studentId)
+    .eq('source_id', sourceId)
+    .eq('source_external_id', projectData.sourceExternalId)
+    .single();
+  
+  const record = {
+    student_id: studentId,
+    source_id: sourceId,
+    name: projectData.name,
+    description: projectData.description || '',
+    url: projectData.url,
+    source_external_id: projectData.sourceExternalId,
+    metadata: projectData.metadata || {},
+    updated_at: new Date().toISOString(),
+    last_synced_at: new Date().toISOString()
+  };
+  
+  if (existing) {
+    const { data } = await supabase
+      .from('projects')
+      .update(record)
+      .eq('id', existing.id)
+      .select('id')
+      .single();
+    return data;
+  } else {
+    const { data, error } = await supabase
+      .from('projects')
+      .insert(record)
+      .select('id')
+      .single();
+    if (error) console.error('Error creating project:', error);
+    return data;
+  }
+};
+
+// Helper to link a project to skills with usage tracking
+const linkProjectSkill = async (projectId, skillId, usageCount = 1) => {
+  if (!supabase || !projectId || !skillId) return;
+  
+  await supabase
+    .from('project_skills')
+    .upsert({
+      project_id: projectId,
+      skill_id: skillId,
+      usage_count: usageCount,
+      last_used: new Date().toISOString()
+    }, { onConflict: 'project_id,skill_id' });
+};
+
+// Helper to link a project to technologies
+const linkProjectTechnology = async (projectId, technologyId) => {
+  if (!supabase || !projectId || !technologyId) return;
+  
+  await supabase
+    .from('project_technologies')
+    .upsert({
+      project_id: projectId,
+      technology_id: technologyId
+    }, { onConflict: 'project_id,technology_id' });
+};
+
+// 🔥 INTELLIGENCE LAYER: Update student_skills with aggregated proficiency
+const updateStudentSkills = async (studentId, inferredSkills, repoDetailsMap, repos) => {
+  if (!supabase || !studentId) return { updated: 0 };
+  
+  let updated = 0;
+  
+  // Calculate skill metrics from all repos
+  const skillMetrics = new Map();
+  
+  for (const skillData of inferredSkills) {
+    const skillName = skillData.skill.toLowerCase().trim();
+    const skill = await getOrCreateSkill(skillName);
+    if (!skill) continue;
+    
+    // Calculate proficiency based on:
+    // - Usage count (how many repos use this skill)
+    // - Recency (when was it last used)
+    // - Depth (commits, stars, etc. as a proxy for depth)
+    
+    let totalBytes = 0;
+    let totalCommits = 0;
+    let totalStars = 0;
+    let lastUsedDate = null;
+    let repoCount = 0;
+    
+    for (const repo of repos) {
+      const repoDetail = repoDetailsMap.get(repo.id);
+      const repoLanguages = repoDetail?.languageBytes || {};
+      
+      // Check if this skill/language is used in this repo
+      const isLanguageMatch = Object.keys(repoLanguages).some(
+        lang => lang.toLowerCase() === skillName
+      );
+      const isTopicMatch = (repo.topics || []).some(
+        t => t.toLowerCase() === skillName
+      );
+      
+      if (isLanguageMatch || isTopicMatch) {
+        repoCount++;
+        totalStars += repo.stargazers_count || 0;
+        totalCommits += (repoDetail?.commits || []).length;
+        
+        if (isLanguageMatch) {
+          const langKey = Object.keys(repoLanguages).find(
+            l => l.toLowerCase() === skillName
+          );
+          totalBytes += repoLanguages[langKey] || 0;
+        }
+        
+        // Track most recent usage
+        const pushedAt = repo.pushed_at ? new Date(repo.pushed_at) : null;
+        if (pushedAt && (!lastUsedDate || pushedAt > lastUsedDate)) {
+          lastUsedDate = pushedAt;
+        }
+      }
+    }
+    
+    // Calculate proficiency score (0-100)
+    // Based on: usage frequency, code volume, project quality
+    const usageScore = Math.min(repoCount * 15, 40); // Max 40 from usage
+    const volumeScore = Math.min(Math.log10(totalBytes + 1) * 5, 30); // Max 30 from volume
+    const qualityScore = Math.min((totalStars * 2) + (totalCommits * 0.5), 30); // Max 30 from quality
+    
+    const proficiencyScore = Math.min(Math.round(usageScore + volumeScore + qualityScore), 100);
+    
+    // Calculate confidence score (0-100)
+    // Higher confidence with more data points
+    const dataPoints = repoCount + totalCommits;
+    const confidenceScore = Math.min(Math.round(dataPoints * 5), 100);
+    
+    skillMetrics.set(skill.id, {
+      skillId: skill.id,
+      proficiencyScore,
+      confidenceScore,
+      usageCount: skillData.score,
+      lastUsed: lastUsedDate?.toISOString() || new Date().toISOString()
+    });
+  }
+  
+  // Upsert student_skills records
+  for (const [skillId, metrics] of skillMetrics) {
+    try {
+      const { error } = await supabase
+        .from('student_skills')
+        .upsert({
+          student_id: studentId,
+          skill_id: skillId,
+          proficiency_score: metrics.proficiencyScore,
+          confidence_score: metrics.confidenceScore,
+          usage_count: metrics.usageCount,
+          last_used: metrics.lastUsed
+        }, { onConflict: 'student_id,skill_id' });
+      
+      if (!error) updated++;
+    } catch (err) {
+      console.error(`Error updating student_skill for skill ${skillId}:`, err);
+    }
+  }
+  
+  return { updated };
+};
+
+// Helper to persist GitHub repos and related data (FULL KNOWLEDGE GRAPH)
 const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, inferredSkills) => {
-  if (!supabase) return { savedRepos: 0, savedSkills: 0 };
+  if (!supabase) return { savedRepos: 0, savedSkills: 0, savedProjects: 0, studentSkillsUpdated: 0 };
   
   let savedRepos = 0;
   let savedSkills = 0;
+  let savedProjects = 0;
+  
+  // 1️⃣ Get or create the 'github' source
+  const githubSource = await getOrCreateSource('github', 'github');
   
   // Save each repository
   for (const repo of repos) {
@@ -328,7 +560,7 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
         savedRepos++;
         const repoDetail = repoDetailsMap.get(repo.id);
         
-        // Save languages
+        // Save languages to github_repo_languages
         if (repoDetail?.languages && typeof repoDetail.languageBytes === 'object') {
           for (const [lang, bytes] of Object.entries(repoDetail.languageBytes)) {
             await supabase
@@ -341,7 +573,7 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
           }
         }
         
-        // Save topics
+        // Save topics to github_repo_topics
         if (Array.isArray(repo.topics)) {
           for (const topic of repo.topics) {
             await supabase
@@ -353,7 +585,7 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
           }
         }
         
-        // Save commits
+        // Save commits to github_commits
         if (repoDetail?.commits && Array.isArray(repoDetail.commits)) {
           for (const commit of repoDetail.commits) {
             const commitData = {
@@ -380,19 +612,80 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
             }
           }
         }
+        
+        // 2️⃣ Create PROJECT from this repo (Activity Layer)
+        if (githubSource) {
+          const project = await createOrUpdateProject(studentId, githubSource.id, {
+            name: repo.name,
+            description: repo.description || '',
+            url: repo.html_url,
+            sourceExternalId: repo.id.toString(),
+            metadata: {
+              stars: repo.stargazers_count,
+              forks: repo.forks_count,
+              language: repo.language,
+              topics: repo.topics,
+              private: repo.private
+            }
+          });
+          
+          if (project) {
+            savedProjects++;
+            
+            // 3️⃣ Link PROJECT_SKILLS (Knowledge Graph Layer)
+            // Link skills from languages
+            if (repoDetail?.languageBytes) {
+              for (const lang of Object.keys(repoDetail.languageBytes)) {
+                const skill = await getOrCreateSkill(lang);
+                if (skill) {
+                  await linkProjectSkill(project.id, skill.id, 1);
+                }
+              }
+            }
+            
+            // Link skills from topics
+            if (Array.isArray(repo.topics)) {
+              for (const topic of repo.topics) {
+                const skill = await getOrCreateSkill(topic);
+                if (skill) {
+                  await linkProjectSkill(project.id, skill.id, 1);
+                }
+              }
+            }
+            
+            // 4️⃣ Link PROJECT_TECHNOLOGIES
+            // Languages are also technologies
+            if (repoDetail?.languageBytes) {
+              for (const lang of Object.keys(repoDetail.languageBytes)) {
+                const tech = await getOrCreateTechnology(lang);
+                if (tech) {
+                  await linkProjectTechnology(project.id, tech.id);
+                }
+              }
+            }
+          }
+        }
       }
     } catch (repoError) {
       console.error(`Error saving repo ${repo.name}:`, repoError);
     }
   }
   
-  // Save inferred skills
+  // Save inferred skills to skills table
   for (const skillData of inferredSkills) {
     const skill = await getOrCreateSkill(skillData.skill);
     if (skill) savedSkills++;
   }
   
-  return { savedRepos, savedSkills };
+  // 5️⃣ INTELLIGENCE LAYER: Update student_skills with proficiency scoring
+  const studentSkillsResult = await updateStudentSkills(studentId, inferredSkills, repoDetailsMap, repos);
+  
+  return { 
+    savedRepos, 
+    savedSkills, 
+    savedProjects,
+    studentSkillsUpdated: studentSkillsResult.updated
+  };
 };
 
 // Helper to create a sync run record
@@ -870,7 +1163,7 @@ const runGithubSync = async ({ token, limit, includePrivate, studentId }) => {
     };
 
     // Persist data to Supabase
-    let dbStats = { savedRepos: 0, savedSkills: 0 };
+    let dbStats = { savedRepos: 0, savedSkills: 0, savedProjects: 0, studentSkillsUpdated: 0 };
     if (studentId) {
       dbStats = await persistGithubData(studentId, githubUser, repos, repoDetailsMap, inferredSkills);
     }
@@ -879,8 +1172,10 @@ const runGithubSync = async ({ token, limit, includePrivate, studentId }) => {
     await updateSyncRun(syncRun?.id, 'success', 'GitHub sync completed successfully', {
       reposFound: repos.length,
       reposSaved: dbStats.savedRepos,
+      projectsSaved: dbStats.savedProjects,
       skillsFound: inferredSkills.length,
-      skillsSaved: dbStats.savedSkills
+      skillsSaved: dbStats.savedSkills,
+      studentSkillsUpdated: dbStats.studentSkillsUpdated
     });
 
     return {

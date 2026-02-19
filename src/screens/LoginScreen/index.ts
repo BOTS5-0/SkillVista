@@ -1,1 +1,1 @@
-export { LoginScreen } from './LoginScreen';
+export { LoginScreenComponent as LoginScreen } from './LoginScreen';

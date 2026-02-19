@@ -1,563 +1,368 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  View, 
-  StyleSheet, 
-  Text, 
-  Platform, 
-  TouchableOpacity, 
-  TextInput, 
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  View,
+  StyleSheet,
+  Text,
+  TextInput,
   ScrollView,
-  ActivityIndicator
+  TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { KnowledgeGraph3D } from '@/components/KnowledgeGraph3D';
+import { Graph3D, GraphNode, GraphLink } from '@/components/Graph3D';
 import { NodeDetailsPanel } from '@/components/NodeDetailsPanel';
+import {
+  transformStudentSkillsToGraph,
+  filterGraph,
+  getCategories,
+} from '@/utils/graphUtils';
 import { api } from '@/services/api';
 
-interface KnowledgeNode {
-  id: number;
-  label: string;
-  category: string;
-  color: string;
-  size: number;
-  strength: number;
-  confidence: number;
-  x?: number;
-  y?: number;
-  z?: number;
-}
-
 export const MapScreen: React.FC = () => {
-  const [selectedNode, setSelectedNode] = useState<KnowledgeNode | null>(null);
-  const [detailsPanelVisible, setDetailsPanelVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
-  const [categories, setCategories] = useState<string[]>([]);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [showSearchResults, setShowSearchResults] = useState(false);
-  const [loadingCategories, setLoadingCategories] = useState(true);
+  const [categoryFilter, setCategoryFilter] = useState<string | undefined>(undefined);
+  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [fullGraphData, setFullGraphData] = useState<{ nodes: GraphNode[]; links: GraphLink[] }>({
+    nodes: [],
+    links: [],
+  });
 
-  // Fetch available categories on mount
+  // Fetch student skills from backend
   useEffect(() => {
-    const fetchCategories = async () => {
+    const fetchStudentData = async () => {
       try {
-        setLoadingCategories(true);
-        const data = await api.getKnowledgeGraphData();
-        setCategories(['All', ...data.categories]);
+        setLoading(true);
+        setError(null);
+
+        // Get stored user
+        const storedUser = await api.getStoredUser();
+        if (!storedUser || !storedUser.id) {
+          setError('User not authenticated');
+          setLoading(false);
+          return;
+        }
+
+        // Fetch student skills from backend
+        const skillsResponse = await api.getStudentSkills(storedUser.id);
+        
+        if (!skillsResponse.skills || skillsResponse.skills.length === 0) {
+          setError('No skills found');
+          setFullGraphData({ nodes: [], links: [] });
+          setLoading(false);
+          return;
+        }
+
+        // Transform backend data to graph format
+        const graphData = transformStudentSkillsToGraph(skillsResponse.skills);
+        setFullGraphData(graphData);
       } catch (err) {
-        console.error('Error fetching categories:', err);
-        setCategories(['All']);
+        console.error('Error fetching student data:', err);
+        setError(
+          err instanceof Error ? err.message : 'Failed to load knowledge graph'
+        );
+        setFullGraphData({ nodes: [], links: [] });
       } finally {
-        setLoadingCategories(false);
+        setLoading(false);
       }
     };
 
-    fetchCategories();
+    fetchStudentData();
   }, []);
 
-  // Handle search
-  const handleSearch = async (query: string) => {
-    setSearchQuery(query);
-    
-    if (query.length < 2) {
-      setSearchResults([]);
-      setShowSearchResults(false);
-      return;
-    }
+  // Filter graph based on search and category
+  const filteredGraphData = useMemo(
+    () =>
+      filterGraph(
+        fullGraphData.nodes,
+        fullGraphData.links,
+        searchQuery,
+        categoryFilter
+      ),
+    [fullGraphData, searchQuery, categoryFilter]
+  );
 
-    try {
-      const results = await api.searchSkills(query);
-      setSearchResults(results.results || []);
-      setShowSearchResults(true);
-    } catch (err) {
-      console.error('Search error:', err);
-      setSearchResults([]);
-    }
+  // Get available categories for filter buttons
+  const categories = useMemo(
+    () => getCategories(fullGraphData.nodes),
+    [fullGraphData]
+  );
+
+  const handleCategoryToggle = (category: string) => {
+    setCategoryFilter(categoryFilter === category ? undefined : category);
   };
 
-  // Handle node click from graph
-  const handleNodeClick = (node: KnowledgeNode) => {
-    setSelectedNode(node);
-    setDetailsPanelVisible(true);
-  };
-
-  // Handle search result selection
-  const handleSearchResultClick = (result: any) => {
-    const node: KnowledgeNode = {
-      id: result.id,
-      label: result.name,
-      category: 'Searched',
-      color: '#A8E6CF',
-      size: 3,
-      strength: 0.5,
-      confidence: 0.5,
-    };
-    handleNodeClick(node);
+  const clearFilters = () => {
     setSearchQuery('');
-    setShowSearchResults(false);
+    setCategoryFilter(undefined);
   };
 
-  // Web version
-  if (Platform.OS === 'web') {
-    return (
-      <div style={styles.webContainer as any}>
-        <div style={styles.webHeader as any}>
-          <h1 style={{ margin: 0, color: '#111', fontSize: 24, fontWeight: 700 }}>
-            Knowledge Graph
-          </h1>
-          <p style={{ margin: '8px 0 0 0', color: '#999', fontSize: 14 }}>
-            Explore your skills in 3D. Click nodes for details, drag to rotate, scroll to zoom.
-          </p>
-        </div>
-
-        <div style={styles.webControlsContainer as any}>
-          <div style={styles.webSearchContainer as any}>
-            <input
-              type="text"
-              placeholder="Search skills..."
-              value={searchQuery}
-              onChange={(e) => handleSearch(e.target.value)}
-              style={styles.webSearchInput as any}
-            />
-            {showSearchResults && searchResults.length > 0 && (
-              <div style={styles.webSearchDropdown as any}>
-                {searchResults.map((result) => (
-                  <div
-                    key={result.id}
-                    style={styles.webSearchResultItem as any}
-                    onClick={() => handleSearchResultClick(result)}
-                  >
-                    {result.name}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div style={styles.webFiltersContainer as any}>
-            <span style={styles.webFilterLabel as any}>Filter by:</span>
-            {loadingCategories ? (
-              <span style={{ fontSize: 12, color: '#999' }}>Loading...</span>
-            ) : (
-              <div style={styles.webFilterButtonsContainer as any}>
-                {categories.map((category) => (
-                  <button
-                    key={category}
-                    onClick={() => setSelectedCategory(category === 'All' ? undefined : category)}
-                    style={{
-                      ...styles.webFilterButton,
-                      ...((!selectedCategory && category === 'All') ||
-                      selectedCategory === category
-                        ? styles.webFilterButtonActive
-                        : styles.webFilterButtonInactive),
-                    } as any}
-                  >
-                    {category}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div style={styles.webGraphContainer as any}>
-          <KnowledgeGraph3D
-            onNodeClick={handleNodeClick}
-            filter={selectedCategory}
-          />
-        </div>
-
-        {/* Details Panel - Integrated inline */}
-        {selectedNode && detailsPanelVisible && (
-          <div
-            style={{
-              ...styles.webDetailsPanel,
-              right: detailsPanelVisible ? 0 : -400,
-            } as any}
-          >
-            <div style={styles.webDetailHeader as any}>
-              <h2 style={{ margin: 0, color: '#111' }}>{selectedNode.label}</h2>
-              <button
-                onClick={() => setDetailsPanelVisible(false)}
-                style={styles.webDetailCloseButton as any}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={styles.webDetailContent as any}>
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-                  <div
-                    style={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: '50%',
-                      backgroundColor: selectedNode.color,
-                      marginRight: 10,
-                    }}
-                  />
-                  <span style={{ fontSize: 14, color: '#666' }}>{selectedNode.category}</span>
-                </div>
-              </div>
-
-              <div style={{ marginBottom: 20 }}>
-                <h3 style={{ fontSize: 14, fontWeight: 600, color: '#111', marginBottom: 10 }}>
-                  Proficiency Level
-                </h3>
-                <div style={{ height: 8, backgroundColor: '#f0f0f0', borderRadius: 4 }}>
-                  <div
-                    style={{
-                      height: '100%',
-                      width: `${Math.round(selectedNode.strength * 100)}%`,
-                      backgroundColor: selectedNode.color,
-                      borderRadius: 4,
-                    }}
-                  />
-                </div>
-                <div style={{ fontSize: 13, color: '#666', marginTop: 8 }}>
-                  {Math.round(selectedNode.strength * 100)}%
-                </div>
-              </div>
-
-              <div style={{ marginBottom: 20 }}>
-                <h3 style={{ fontSize: 14, fontWeight: 600, color: '#111', marginBottom: 10 }}>
-                  Confidence Score
-                </h3>
-                <div style={{ height: 8, backgroundColor: '#f0f0f0', borderRadius: 4 }}>
-                  <div
-                    style={{
-                      height: '100%',
-                      width: `${Math.round(selectedNode.confidence * 100)}%`,
-                      backgroundColor: '#4ECDC4',
-                      borderRadius: 4,
-                    }}
-                  />
-                </div>
-                <div style={{ fontSize: 13, color: '#666', marginTop: 8 }}>
-                  {Math.round(selectedNode.confidence * 100)}%
-                </div>
-              </div>
-
-              <div style={{ backgroundColor: '#f5f5f5', padding: 12, borderRadius: 4 }}>
-                <h3 style={{ fontSize: 13, fontWeight: 600, color: '#111', marginBottom: 8 }}>
-                  About
-                </h3>
-                <p style={{ fontSize: 12, color: '#666', lineHeight: 1.6, margin: 0 }}>
-                  This skill is inferred from your GitHub projects, certifications, and other
-                  connected sources.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // Mobile version
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Knowledge Graph</Text>
-          <Text style={styles.subtitle}>Explore your skills in 3D</Text>
-        </View>
+      <View style={styles.header}>
+        <Text style={styles.title}>Knowledge Graph</Text>
+        <Text style={styles.subtitle}>Your Skills Network</Text>
+      </View>
 
-        <View style={styles.searchContainer}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search skills..."
-            value={searchQuery}
-            onChangeText={handleSearch}
-            placeholderTextColor="#999"
-          />
+      {loading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#3b82f6" />
+          <Text style={styles.loadingText}>Loading your knowledge graph...</Text>
         </View>
-
-        {showSearchResults && searchResults.length > 0 && (
-          <ScrollView style={styles.searchResults}>
-            {searchResults.map((result) => (
+      ) : error ? (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorTitle}>⚠️ Error</Text>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      ) : (
+        <>
+          {/* Search Bar */}
+          <View style={styles.searchContainer}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search skills..."
+              placeholderTextColor="#999"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            {searchQuery && (
               <TouchableOpacity
-                key={result.id}
-                style={styles.searchResultItem}
-                onPress={() => handleSearchResultClick(result)}
+                onPress={() => setSearchQuery('')}
+                style={styles.clearButton}
               >
-                <Text style={styles.searchResultText}>{result.name}</Text>
+                <Text style={styles.clearButtonText}>✕</Text>
               </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
+            )}
+          </View>
 
-        <View style={styles.filterContainer}>
-          <Text style={styles.filterLabel}>Filter by category:</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterButtons}>
-            {loadingCategories ? (
-              <ActivityIndicator size="small" color="#4ECDC4" />
-            ) : (
-              categories.map((category) => (
+          {/* Category Filter Pills */}
+          {categories.length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.categoryScroll}
+              contentContainerStyle={styles.categoryContainer}
+            >
+              {categories.map((category) => (
                 <TouchableOpacity
-                  key={category}
-                  onPress={() => setSelectedCategory(category === 'All' ? undefined : category)}
+                  key={`category-${category}`}
                   style={[
-                    styles.filterButton,
-                    (!selectedCategory && category === 'All') || selectedCategory === category
-                      ? styles.filterButtonActive
-                      : styles.filterButtonInactive,
+                    styles.categoryPill,
+                    categoryFilter === category && styles.categoryPillActive,
                   ]}
+                  onPress={() => handleCategoryToggle(category)}
                 >
                   <Text
                     style={[
-                      styles.filterButtonText,
-                      (!selectedCategory && category === 'All') || selectedCategory === category
-                        ? styles.filterButtonTextActive
-                        : styles.filterButtonTextInactive,
+                      styles.categoryPillText,
+                      categoryFilter === category && styles.categoryPillTextActive,
                     ]}
                   >
                     {category}
                   </Text>
                 </TouchableOpacity>
-              ))
+              ))}
+            </ScrollView>
+          )}
+
+          {/* Results info */}
+          <View style={styles.statsContainer}>
+            <Text style={styles.statsText}>
+              {filteredGraphData.nodes.length} skill
+              {filteredGraphData.nodes.length !== 1 ? 's' : ''} •{' '}
+              {filteredGraphData.links.length} connection
+              {filteredGraphData.links.length !== 1 ? 's' : ''}
+            </Text>
+            {(searchQuery || categoryFilter) && (
+              <TouchableOpacity onPress={clearFilters}>
+                <Text style={styles.clearLink}>Clear filters</Text>
+              </TouchableOpacity>
             )}
-          </ScrollView>
-        </View>
+          </View>
 
-        <View style={styles.graphContainer}>
-          <KnowledgeGraph3D onNodeClick={handleNodeClick} filter={selectedCategory} />
-        </View>
+          {/* 3D Graph Canvas */}
+          <View style={styles.canvasContainer}>
+            {filteredGraphData.nodes.length > 0 ? (
+              <Graph3D
+                nodes={filteredGraphData.nodes}
+                links={filteredGraphData.links}
+                onNodeClick={setSelectedNode}
+                onNodeHover={setHoveredNode}
+                selectedNodeId={selectedNode?.id}
+              />
+            ) : (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateTitle}>No results found</Text>
+                <Text style={styles.emptyStateText}>
+                  Try adjusting your search or filters
+                </Text>
+              </View>
+            )}
+          </View>
 
-        <NodeDetailsPanel
-          node={selectedNode}
-          visible={detailsPanelVisible}
-          onClose={() => setDetailsPanelVisible(false)}
-        />
-      </View>
+          {/* Node Details Panel */}
+          {selectedNode && (
+            <NodeDetailsPanel
+              node={selectedNode}
+              isOpen={!!selectedNode}
+              onClose={() => setSelectedNode(null)}
+            />
+          )}
+        </>
+      )}
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  // React Native styles
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#0f172a',
   },
-  content: {
+  loadingContainer: {
     flex: 1,
-    paddingHorizontal: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 14,
+    color: '#94a3b8',
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 24,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#ef4444',
+    marginBottom: 8,
+  },
+  errorText: {
+    fontSize: 14,
+    color: '#94a3b8',
+    textAlign: 'center',
   },
   header: {
-    marginTop: 16,
-    marginBottom: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
   },
   title: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#111',
+    color: '#ffffff',
     marginBottom: 4,
   },
   subtitle: {
-    fontSize: 14,
-    color: '#999',
+    fontSize: 12,
+    color: '#64748b',
   },
   searchContainer: {
-    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginHorizontal: 0,
+    backgroundColor: '#1e293b',
   },
   searchInput: {
-    backgroundColor: 'white',
+    flex: 1,
+    height: 40,
     borderRadius: 8,
+    backgroundColor: '#0f172a',
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    color: '#ffffff',
     fontSize: 14,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
-    color: '#111',
+    borderColor: '#334155',
   },
-  searchResults: {
-    backgroundColor: 'white',
-    borderRadius: 8,
-    maxHeight: 150,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
+  clearButton: {
+    padding: 8,
+    marginLeft: 8,
   },
-  searchResultItem: {
-    padding: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  searchResultText: {
-    fontSize: 14,
-    color: '#111',
-  },
-  filterContainer: {
-    marginBottom: 12,
-  },
-  filterLabel: {
-    fontSize: 12,
+  clearButtonText: {
+    color: '#94a3b8',
+    fontSize: 18,
     fontWeight: '600',
-    color: '#666',
-    marginBottom: 8,
   },
-  filterButtons: {
-    flexDirection: 'row',
+  categoryScroll: {
+    maxHeight: 50,
+    backgroundColor: '#0f172a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
   },
-  filterButton: {
+  categoryContainer: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  categoryPill: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
-    marginRight: 8,
+    backgroundColor: '#1e293b',
     borderWidth: 1,
+    borderColor: '#334155',
   },
-  filterButtonActive: {
-    backgroundColor: '#4ECDC4',
-    borderColor: '#4ECDC4',
+  categoryPillActive: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#2563eb',
   },
-  filterButtonInactive: {
-    backgroundColor: 'white',
-    borderColor: '#e0e0e0',
-  },
-  filterButtonText: {
+  categoryPillText: {
     fontSize: 12,
     fontWeight: '500',
+    color: '#94a3b8',
   },
-  filterButtonTextActive: {
-    color: 'white',
+  categoryPillTextActive: {
+    color: '#ffffff',
   },
-  filterButtonTextInactive: {
-    color: '#666',
-  },
-  graphContainer: {
-    flex: 1,
-    borderRadius: 8,
-    overflow: 'hidden',
-    marginBottom: 12,
-  },
-
-  // Web styles
-  webContainer: {
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    backgroundColor: '#f5f5f5',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-  } as any,
-  webHeader: {
-    padding: '20px 24px',
-    borderBottom: '1px solid #e0e0e0',
-    backgroundColor: 'white',
-  } as any,
-  webControlsContainer: {
-    padding: '16px 24px',
-    backgroundColor: 'white',
-    borderBottom: '1px solid #e0e0e0',
-    display: 'flex',
-    gap: 16,
-    alignItems: 'center',
-    flexWrap: 'wrap',
-  } as any,
-  webSearchContainer: {
-    position: 'relative',
-    flex: 1,
-    minWidth: 200,
-  } as any,
-  webSearchInput: {
-    width: '100%',
-    padding: '8px 12px',
-    border: '1px solid #e0e0e0',
-    borderRadius: 6,
-    fontSize: 14,
-    fontFamily: 'inherit',
-  } as any,
-  webSearchDropdown: {
-    position: 'absolute',
-    top: '100%',
-    left: 0,
-    right: 0,
-    backgroundColor: 'white',
-    border: '1px solid #e0e0e0',
-    borderTop: 'none',
-    borderRadius: '0 0 6px 6px',
-    maxHeight: 200,
-    overflowY: 'auto',
-    zIndex: 10,
-  } as any,
-  webSearchResultItem: {
-    padding: '8px 12px',
-    borderBottom: '1px solid #f0f0f0',
-    cursor: 'pointer',
-    fontSize: 13,
-    color: '#111',
-  } as any,
-  webFiltersContainer: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-  } as any,
-  webFilterLabel: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#666',
-    whiteSpace: 'nowrap',
-  } as any,
-  webFilterButtonsContainer: {
-    display: 'flex',
-    gap: 8,
-    flexWrap: 'wrap',
-  } as any,
-  webFilterButton: {
-    padding: '6px 12px',
-    border: '1px solid #e0e0e0',
-    borderRadius: 16,
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: 'pointer',
-    transition: 'all 0.2s',
-  } as any,
-  webFilterButtonActive: {
-    backgroundColor: '#4ECDC4',
-    borderColor: '#4ECDC4',
-    color: 'white',
-  } as any,
-  webFilterButtonInactive: {
-    backgroundColor: 'white',
-    color: '#666',
-  } as any,
-  webGraphContainer: {
-    flex: 1,
-    position: 'relative',
-    overflow: 'hidden',
-  } as any,
-  webDetailsPanel: {
-    position: 'fixed',
-    right: 0,
-    top: 0,
-    width: 400,
-    height: '100%',
-    backgroundColor: 'white',
-    boxShadow: '-2px 0 10px rgba(0,0,0,0.1)',
-    zIndex: 1000,
-    overflowY: 'auto',
-    transition: 'right 0.3s ease-in-out',
-    display: 'flex',
-    flexDirection: 'column',
-  } as any,
-  webDetailHeader: {
-    display: 'flex',
+  statsContainer: {
+    flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
-    borderBottom: '1px solid #f0f0f0',
-  } as any,
-  webDetailCloseButton: {
-    background: 'none',
-    border: 'none',
-    fontSize: 24,
-    cursor: 'pointer',
-    color: '#999',
-  } as any,
-  webDetailContent: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#0f172a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  statsText: {
+    fontSize: 12,
+    color: '#64748b',
+  },
+  clearLink: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '500',
+  },
+  canvasContainer: {
     flex: 1,
-    padding: 20,
-    overflowY: 'auto',
-  } as any,
+    backgroundColor: '#000000',
+    overflow: 'hidden',
+  },
+  emptyState: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+  },
+  emptyStateTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#ffffff',
+    marginBottom: 8,
+  },
+  emptyStateText: {
+    fontSize: 14,
+    color: '#64748b',
+  },
 });

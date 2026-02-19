@@ -8,28 +8,50 @@ import {
   ScrollView,
   Platform,
 } from 'react-native';
-
-interface KnowledgeNode {
-  id: number;
-  label: string;
-  category: string;
-  color: string;
-  size: number;
-  strength: number;
-  confidence: number;
-}
+import { GraphNode } from '@/components/Graph3D';
 
 interface NodeDetailsPanelProps {
-  node: KnowledgeNode | null;
+  node: GraphNode | null;
   onClose: () => void;
-  visible: boolean;
+  isOpen: boolean;
 }
 
-const NodeDetailsPanel: React.FC<NodeDetailsPanelProps> = ({ node, onClose, visible }) => {
+const NodeDetailsPanel: React.FC<NodeDetailsPanelProps> = ({ node, onClose, isOpen }) => {
   if (!node) return null;
 
-  const proficiencyPercentage = Math.round(node.strength * 100);
   const confidencePercentage = Math.round(node.confidence * 100);
+
+  const CATEGORY_COLORS: Record<string, string> = {
+    'Frontend': '#3b82f6',
+    'Backend': '#10b981',
+    'Database': '#f59e0b',
+    'AI': '#8b5cf6',
+    'DevOps': '#ef4444',
+    'Mobile': '#06b6d4',
+    'Core CS': '#ec4899',
+    'Project': '#a78bfa',
+    'Certification': '#fbbf24',
+  };
+
+  const levelDescriptions: Record<string, string> = {
+    'beginner': 'Just starting to learn and explore',
+    'intermediate': 'Good understanding and practical experience',
+    'advanced': 'Expert level with significant experience',
+  };
+
+  const categoryDescriptions: Record<string, string> = {
+    'Frontend': 'Front-end development technologies and frameworks',
+    'Backend': 'Back-end and server-side technologies',
+    'Database': 'Database systems and data management',
+    'AI': 'Artificial Intelligence and machine learning',
+    'DevOps': 'DevOps, deployment, and infrastructure',
+    'Mobile': 'Mobile app development',
+    'Core CS': 'Core computer science fundamentals',
+    'Project': 'A project that demonstrates your skills',
+    'Certification': 'An earned professional certification',
+  };
+
+  const categoryColor = CATEGORY_COLORS[node.category] || '#6b7280';
 
   const renderBar = (percentage: number, color: string) => (
     <View style={styles.barContainer}>
@@ -37,28 +59,18 @@ const NodeDetailsPanel: React.FC<NodeDetailsPanelProps> = ({ node, onClose, visi
     </View>
   );
 
-  // Determine category description
-  const categoryDescriptions: Record<string, string> = {
-    'AI/ML': 'Artificial Intelligence and Machine Learning technologies and concepts',
-    'Web': 'Web development frameworks, libraries, and technologies',
-    'Cloud/DevOps': 'Cloud platforms, containerization, and DevOps tools',
-    'Database': 'Database systems and data management technologies',
-    'Core CS': 'Fundamental computer science concepts and languages',
-    'Other': 'Other technologies and skills',
-  };
-
   // Mobile/React Native version
   return (
     <Modal
       transparent
-      visible={visible}
+      visible={isOpen}
       onRequestClose={onClose}
       animationType="slide"
     >
       <View style={styles.modalOverlay}>
         <View style={styles.modalContent}>
           <View style={styles.header}>
-            <Text style={styles.title}>{node.label}</Text>
+            <Text style={styles.title}>{node.name}</Text>
             <TouchableOpacity onPress={onClose}>
               <Text style={styles.closeButton}>✕</Text>
             </TouchableOpacity>
@@ -70,7 +82,7 @@ const NodeDetailsPanel: React.FC<NodeDetailsPanelProps> = ({ node, onClose, visi
                 <View
                   style={[
                     styles.categoryDot,
-                    { backgroundColor: node.color },
+                    { backgroundColor: categoryColor },
                   ]}
                 />
                 <Text style={styles.categoryText}>{node.category}</Text>
@@ -82,22 +94,26 @@ const NodeDetailsPanel: React.FC<NodeDetailsPanelProps> = ({ node, onClose, visi
 
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Proficiency Level</Text>
-              {renderBar(proficiencyPercentage, node.color)}
-              <Text style={styles.barLabel}>{proficiencyPercentage}%</Text>
+              <View style={styles.levelBadge}>
+                <Text style={styles.levelText}>{node.level}</Text>
+              </View>
+              <Text style={styles.levelDescription}>
+                {levelDescriptions[node.level] || 'Working on this skill'}
+              </Text>
             </View>
 
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Confidence Score</Text>
-              {renderBar(confidencePercentage, '#4ECDC4')}
+              {renderBar(confidencePercentage, categoryColor)}
               <Text style={styles.barLabel}>{confidencePercentage}%</Text>
             </View>
 
             <View style={styles.infoBox}>
               <Text style={styles.infoTitle}>About</Text>
               <Text style={styles.infoText}>
-                This skill is inferred from your GitHub projects, certifications, and other
-                connected sources. The proficiency level is calculated based on usage frequency
-                and code contributions.
+                This node represents a {node.category.toLowerCase()} with the label "{node.name}". 
+                The confidence score indicates how reliably this connection was detected based 
+                on your GitHub activity, projects, and certifications.
               </Text>
             </View>
           </ScrollView>
@@ -167,6 +183,25 @@ const styles = StyleSheet.create({
     color: '#999',
     lineHeight: 20,
   },
+  levelBadge: {
+    backgroundColor: '#f0f0f0',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    marginBottom: 8,
+    alignSelf: 'flex-start',
+  },
+  levelText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#333',
+    textTransform: 'capitalize',
+  },
+  levelDescription: {
+    fontSize: 12,
+    color: '#999',
+    marginTop: 4,
+  },
   sectionTitle: {
     fontSize: 14,
     fontWeight: '600',
@@ -208,4 +243,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default NodeDetailsPanel;
+export { NodeDetailsPanel };

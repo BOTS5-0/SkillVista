@@ -18,24 +18,16 @@ import * as WebBrowser from 'expo-web-browser';
 import { api, GitHubSyncResponse } from '@/services/api';
 import { mockProfile } from '@/data/mockData';
 
-const API_BASE_URL = 'https://skillvista-1.onrender.com/api';
-
 export const HomeScreen: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [userData, setUserData] = useState<any>(null);
   const [githubData, setGithubData] = useState<GitHubSyncResponse | null>(null);
-  const [skillStrengthScore, setSkillStrengthScore] = useState<number | null>(null);
-  const [skillsData, setSkillsData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<string>('');
-  const [syncProgress, setSyncProgress] = useState<{ current: number; total: number } | null>(null);
-  const [streamingRepos, setStreamingRepos] = useState<any[]>([]);
   const router = useRouter();
 
   useFocusEffect(
     React.useCallback(() => {
       loadUserData();
-      loadSkillsData();
     }, [])
   );
 
@@ -48,153 +40,8 @@ export const HomeScreen: React.FC = () => {
     }
   };
 
-  const loadSkillsData = async () => {
-    try {
-      const data = await api.getGitHubData();
-      if (data.skills && data.skills.length > 0) {
-        setSkillsData(data.skills);
-        // Calculate overall skill strength from top 10 skills' proficiency scores
-        const topSkills = data.skills.slice(0, 10);
-        const avgScore = topSkills.reduce((sum: number, s: any) => sum + (s.proficiencyScore || 0), 0) / topSkills.length;
-        // Normalize to 0-100 scale (scores are typically 0-1 or low values)
-        const normalized = Math.min(100, Math.round(avgScore * 100));
-        setSkillStrengthScore(normalized);
-      }
-    } catch (error) {
-      console.warn('Failed to load skills data', error);
-    }
-  };
-
-  // Stream GitHub sync with progressive updates
-  const streamGitHubSync = async () => {
-    const token = await api.getStoredToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-
-    setStreamingRepos([]);
-    setSyncProgress(null);
-    
-    return new Promise<void>((resolve, reject) => {
-      const url = `${API_BASE_URL}/integrations/github/sync-stream`;
-      
-      // Use fetch with readable stream for SSE
-      fetch(url, {
-        headers: { Authorization: `Bearer ${token}` }
-      }).then(async response => {
-        if (!response.ok) {
-          try {
-            const error = await response.json();
-            if (error.needsOAuth) {
-              reject({ needsOAuth: true, message: 'GitHub not connected' });
-            } else {
-              reject(new Error(error.error || `Server error: ${response.status}`));
-            }
-          } catch (parseError) {
-            // If response body isn't JSON, show status code
-            reject(new Error(`Server error: ${response.status} ${response.statusText}`));
-          }
-          return;
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) {
-          reject(new Error('Stream not supported'));
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let allRepos: any[] = [];
-        let allSkills: any[] = [];
-        let githubUser: any = null;
-
-        const processLine = (line: string) => {
-          if (line.startsWith('event: ')) {
-            // Store event type for next data line
-            (processLine as any).currentEvent = line.substring(7).trim();
-          } else if (line.startsWith('data: ')) {
-            const eventType = (processLine as any).currentEvent || 'message';
-            try {
-              const data = JSON.parse(line.substring(6));
-              
-              switch (eventType) {
-                case 'status':
-                  setSyncStatus(data.message);
-                  break;
-                case 'user':
-                  githubUser = data;
-                  break;
-                case 'repos_count':
-                  setSyncProgress({ current: 0, total: data.total });
-                  break;
-                case 'repo':
-                  allRepos.push(data.repo);
-                  setStreamingRepos([...allRepos]);
-                  setSyncProgress({ current: data.index + 1, total: data.total });
-                  // Update githubData progressively
-                  setGithubData({
-                    provider: 'github',
-                    studentName: githubUser?.name || 'User',
-                    syncedAt: new Date().toISOString(),
-                    source: 'oauth',
-                    repositories: allRepos,
-                    inferredSkills: allSkills,
-                    totals: { repositories: allRepos.length, inferredSkills: allSkills.length },
-                    githubUser
-                  });
-                  break;
-                case 'skills':
-                  allSkills = data;
-                  setSkillsData(data);
-                  setGithubData(prev => prev ? { ...prev, inferredSkills: data, totals: { ...prev.totals, inferredSkills: data.length } } : null);
-                  break;
-                case 'complete':
-                  setSyncStatus('Sync complete!');
-                  setTimeout(() => setSyncStatus(''), 2000);
-                  resolve();
-                  break;
-                case 'error':
-                  reject(new Error(data.message));
-                  break;
-              }
-            } catch (e) {
-              // Ignore parse errors for partial lines
-            }
-          }
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          
-          for (const line of lines) {
-            if (line.trim()) processLine(line);
-          }
-        }
-        
-        // Process any remaining buffer
-        if (buffer.trim()) {
-          const lines = buffer.split('\n');
-          for (const line of lines) {
-            if (line.trim()) processLine(line);
-          }
-        }
-        
-        resolve();
-      }).catch((fetchError) => {
-        reject(new Error(`Failed to connect to server: ${fetchError?.message || 'Network error'}`));
-      });
-    });
-  };
-
   const handleGitHubOAuth = async () => {
     setIsLoading(true);
-    setSyncStatus('Starting...');
     try {
       // Step 1: Get the OAuth URL from our backend
       const { authUrl } = await api.getGithubOAuthUrl();
@@ -205,25 +52,25 @@ export const HomeScreen: React.FC = () => {
       // Step 3: After user returns from browser, wait for callback to complete
       if (result.type === 'cancel') {
         setIsLoading(false);
-        setSyncStatus('');
         return; // User cancelled
       }
       
       // Step 4: Wait a moment for the OAuth callback to complete on the server
-      setSyncStatus('Completing authorization...');
+      // The callback saves the token to the database
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // Step 5: Try to stream sync with retries
+      // Step 5: Try to sync with retries (callback might still be processing)
       let lastError: any = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          await streamGitHubSync();
+          const data = await api.syncGitHubReposOAuth();
+          setGithubData(data);
           Alert.alert('Success', 'GitHub profile synced successfully!');
           return;
         } catch (err: any) {
           lastError = err;
           if (err.needsOAuth) {
-            setSyncStatus('Waiting for authorization...');
+            // Token not saved yet, wait and retry
             await new Promise(resolve => setTimeout(resolve, 1500));
           } else {
             throw err;
@@ -234,7 +81,6 @@ export const HomeScreen: React.FC = () => {
       throw lastError || new Error('Failed to sync after multiple attempts');
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to connect GitHub');
-      setSyncStatus('');
     } finally {
       setIsLoading(false);
     }
@@ -299,104 +145,24 @@ export const HomeScreen: React.FC = () => {
           <Text style={styles.title}>Welcome, {userData?.name || 'User'}!</Text>
           <Text style={styles.subtitle}>Your learning dashboard</Text>
 
-          {skillStrengthScore !== null && (
-            <View style={styles.skillStrengthCard}>
-              <View style={styles.skillStrengthHeader}>
-                <Ionicons name="fitness-outline" size={24} color="#059669" />
-                <Text style={styles.skillStrengthTitle}>Skill Strength Score</Text>
-              </View>
-              <View style={styles.skillStrengthContent}>
-                <View style={styles.skillScoreCircle}>
-                  <Text style={styles.skillScoreValue}>{skillStrengthScore}</Text>
-                  <Text style={styles.skillScoreMax}>/100</Text>
-                </View>
-                <View style={styles.skillStrengthMeter}>
-                  <View style={styles.skillMeterTrack}>
-                    <View 
-                      style={[
-                        styles.skillMeterFill, 
-                        { width: `${skillStrengthScore}%` },
-                        skillStrengthScore >= 70 ? styles.skillMeterHigh :
-                        skillStrengthScore >= 40 ? styles.skillMeterMedium :
-                        styles.skillMeterLow
-                      ]} 
-                    />
-                  </View>
-                  <Text style={styles.skillStrengthLabel}>
-                    {skillStrengthScore >= 70 ? 'Strong' :
-                     skillStrengthScore >= 40 ? 'Growing' : 'Building'}
-                  </Text>
-                </View>
-              </View>
-              {skillsData.length > 0 && (
-                <View style={styles.topProficientSkills}>
-                  <Text style={styles.topSkillsLabel}>Top proficient skills:</Text>
-                  <View style={styles.proficientSkillsList}>
-                    {skillsData.slice(0, 3).map((s: any, idx: number) => (
-                      // @ts-ignore - key is valid prop in React
-                      <View key={`prof-${idx}`} style={styles.proficientSkillBadge}>
-                        <Text style={styles.proficientSkillText}>{s.skill}</Text>
-                        <Text style={styles.proficientSkillScore}>
-                          {Math.round((s.proficiencyScore || 0) * 100)}%
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-            </View>
-          )}
-
-          {!githubData && !isLoading && (
+          {!githubData && (
             <TouchableOpacity
               style={styles.syncButton}
               onPress={handleGitHubOAuth}
               disabled={isLoading}
             >
-              <Ionicons name="logo-github" size={18} color="#fff" />
-              <Text style={styles.syncButtonText}>Connect GitHub</Text>
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="logo-github" size={18} color="#fff" />
+                  <Text style={styles.syncButtonText}>Connect GitHub</Text>
+                </>
+              )}
             </TouchableOpacity>
           )}
 
-          {isLoading && (
-            <View style={styles.syncProgressContainer}>
-              <View style={styles.syncProgressHeader}>
-                <ActivityIndicator color="#1D4ED8" />
-                <Text style={styles.syncProgressStatus}>{syncStatus || 'Syncing...'}</Text>
-              </View>
-              {syncProgress && (
-                <View style={styles.syncProgressBar}>
-                  <View 
-                    style={[
-                      styles.syncProgressFill, 
-                      { width: `${(syncProgress.current / syncProgress.total) * 100}%` }
-                    ]} 
-                  />
-                </View>
-              )}
-              {syncProgress && (
-                <Text style={styles.syncProgressText}>
-                  {syncProgress.current} of {syncProgress.total} repositories
-                </Text>
-              )}
-              {streamingRepos.length > 0 && (
-                <View style={styles.streamingReposList}>
-                  {streamingRepos.slice(-3).map((repo, idx) => (
-                    // @ts-ignore - key is valid prop in React
-                    <View key={`stream-${idx}`} style={styles.streamingRepoItem}>
-                      <Ionicons name="checkmark-circle" size={14} color="#059669" />
-                      <Text style={styles.streamingRepoName}>{repo.name}</Text>
-                      {repo.language && (
-                        <Text style={styles.streamingRepoLang}>{repo.language}</Text>
-                      )}
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
-          )}
-
-          {githubData && !isLoading && (
+          {githubData && (
             <View style={styles.statsContainer}>
               <View style={styles.statCard}>
                 <Ionicons name="code-outline" size={24} color="#1D4ED8" />
@@ -639,183 +405,5 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
-  },
-  skillStrengthCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 24,
-    shadowColor: '#0F172A',
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: '#D1FAE5',
-  },
-  skillStrengthHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 16,
-  },
-  skillStrengthTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#0F172A',
-  },
-  skillStrengthContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
-  },
-  skillScoreCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#ECFDF5',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 3,
-    borderColor: '#059669',
-  },
-  skillScoreValue: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: '#059669',
-  },
-  skillScoreMax: {
-    fontSize: 10,
-    color: '#6B7280',
-    marginTop: -4,
-  },
-  skillStrengthMeter: {
-    flex: 1,
-  },
-  skillMeterTrack: {
-    height: 12,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  skillMeterFill: {
-    height: '100%',
-    borderRadius: 6,
-  },
-  skillMeterHigh: {
-    backgroundColor: '#059669',
-  },
-  skillMeterMedium: {
-    backgroundColor: '#F59E0B',
-  },
-  skillMeterLow: {
-    backgroundColor: '#EF4444',
-  },
-  skillStrengthLabel: {
-    fontSize: 13,
-    color: '#64748B',
-    fontWeight: '600',
-    marginTop: 6,
-  },
-  topProficientSkills: {
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#E2E8F0',
-  },
-  topSkillsLabel: {
-    fontSize: 12,
-    color: '#64748B',
-    marginBottom: 8,
-  },
-  proficientSkillsList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  proficientSkillBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDF4',
-    borderRadius: 16,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    gap: 6,
-    borderWidth: 1,
-    borderColor: '#BBF7D0',
-  },
-  proficientSkillText: {
-    fontSize: 12,
-    color: '#166534',
-    fontWeight: '600',
-  },
-  proficientSkillScore: {
-    fontSize: 11,
-    color: '#059669',
-    fontWeight: '700',
-  },
-  syncProgressContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: '#0F172A',
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 3,
-  },
-  syncProgressHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 16,
-  },
-  syncProgressStatus: {
-    fontSize: 14,
-    color: '#1E293B',
-    fontWeight: '600',
-    flex: 1,
-  },
-  syncProgressBar: {
-    height: 8,
-    backgroundColor: '#E2E8F0',
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  syncProgressFill: {
-    height: '100%',
-    backgroundColor: '#1D4ED8',
-    borderRadius: 4,
-  },
-  syncProgressText: {
-    fontSize: 12,
-    color: '#64748B',
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  streamingReposList: {
-    borderTopWidth: 1,
-    borderTopColor: '#E2E8F0',
-    paddingTop: 12,
-    gap: 8,
-  },
-  streamingRepoItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  streamingRepoName: {
-    fontSize: 13,
-    color: '#1E293B',
-    fontWeight: '500',
-    flex: 1,
-  },
-  streamingRepoLang: {
-    fontSize: 11,
-    color: '#64748B',
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
   },
 });

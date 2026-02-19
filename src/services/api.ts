@@ -265,6 +265,48 @@ class SkillVistaAPI {
     });
   }
 
+  async getStudentSkills(studentId: string | number): Promise<{
+    studentId: number;
+    skills: Array<{
+      student_id: number;
+      skill_id: number;
+      proficiency_score: number;
+      confidence_score: number;
+      usage_count: number;
+      last_used: string;
+      skills: {
+        id: number;
+        name: string;
+        category: string;
+      };
+    }>;
+  }> {
+    return this.request(`/students/${studentId}/skills`, {
+      method: 'GET',
+    });
+  }
+
+  async getStudentGraph(
+    studentId: string | number,
+    depth: number = 2
+  ): Promise<{
+    nodes: Array<{
+      id: string | number;
+      label: string;
+      type: string;
+      category?: string;
+    }>;
+    edges: Array<{
+      source: string | number;
+      target: string | number;
+      relationship: string;
+    }>;
+  }> {
+    return this.request(`/students/${studentId}/graph?depth=${depth}`, {
+      method: 'GET',
+    });
+  }
+
   async logout() {
     await AsyncStorage.removeItem(AUTH_TOKEN_KEY);
     await AsyncStorage.removeItem(USER_DATA_KEY);

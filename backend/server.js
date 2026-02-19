@@ -8,7 +8,6 @@ const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const axios = require('axios');
-const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
@@ -36,13 +35,8 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_REDIRECT_URI = process.env.GITHUB_REDIRECT_URI || '';
 const GITHUB_STATIC_TOKEN = process.env.GITHUB_TOKEN || '';
-const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || '';
 const NLP_SERVICE_URL = process.env.NLP_SERVICE_URL || 'http://127.0.0.1:8000';
 const DEFAULT_ENTITY_LABELS = ['Language', 'Framework', 'Database', 'CloudService', 'Tool', 'Concept'];
-const ENABLE_SYNC_JOBS = ['1', 'true', 'yes', 'on'].includes(String(process.env.ENABLE_SYNC_JOBS || 'true').toLowerCase());
-const SYNC_SCHEDULE = process.env.SYNC_SCHEDULE || '*/15 * * * *';
-const AUTO_SYNC_INTERVAL_MINUTES = Math.max(Number(process.env.AUTO_SYNC_INTERVAL_MINUTES) || 30, 5);
-const QUEUE_DRAIN_BATCH = Math.max(Number(process.env.QUEUE_DRAIN_BATCH) || 5, 1);
 
 // Temporary in-memory stores for OAuth state (short-lived, don't need DB)
 const pendingGithubStates = new Map();
@@ -53,6 +47,7 @@ const backgroundSyncStatus = new Map(); // userId -> { inProgress: boolean, last
 
 app.use(helmet());
 app.use(cors());
+app.use(express.json());
 app.use(morgan('dev'));
 app.use(
   `${API_PREFIX}/`,
@@ -111,108 +106,6 @@ const resolveAlias = async (text, fallbackType) => {
     targetType: data.target_type
   };
 };
-
-const isGithubWebhookSignatureValid = (rawBody, signatureHeader) => {
-  if (!GITHUB_WEBHOOK_SECRET) return false;
-  const signature = safeString(signatureHeader);
-  if (!signature.startsWith('sha256=')) return false;
-  const expected = `sha256=${crypto
-    .createHmac('sha256', GITHUB_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('hex')}`;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch (_error) {
-    return false;
-  }
-};
-
-app.post(`${API_PREFIX}/integrations/github/webhook`, express.raw({ type: '*/*' }), async (req, res) => {
-  if (!supabase) return res.status(503).json({ error: 'Database unavailable' });
-  if (!GITHUB_WEBHOOK_SECRET) return res.status(500).json({ error: 'Missing GITHUB_WEBHOOK_SECRET' });
-
-  const isValid = isGithubWebhookSignatureValid(req.body, req.headers['x-hub-signature-256']);
-  if (!isValid) return res.status(401).json({ error: 'Invalid webhook signature' });
-
-  const event = safeString(req.headers['x-github-event']);
-  const deliveryId = safeString(req.headers['x-github-delivery']);
-  let payload = {};
-  try {
-    payload = JSON.parse(Buffer.from(req.body).toString('utf8'));
-  } catch (_error) {
-    return res.status(400).json({ error: 'Invalid JSON payload' });
-  }
-
-  if (event === 'ping') {
-    return res.json({ ok: true, event: 'ping', deliveryId });
-  }
-
-  if (!['push', 'repository', 'installation_repositories', 'create', 'release'].includes(event)) {
-    return res.json({ ok: true, ignored: true, event, deliveryId });
-  }
-
-  const senderId = payload?.sender?.id ? String(payload.sender.id) : null;
-  const senderLogin = safeString(payload?.sender?.login);
-
-  let queryBuilder = supabase
-    .from('integration_accounts')
-    .select('student_id, access_token, external_user_id, external_username')
-    .eq('provider', 'github');
-
-  if (senderId) {
-    queryBuilder = queryBuilder.eq('external_user_id', senderId);
-  } else if (senderLogin) {
-    queryBuilder = queryBuilder.ilike('external_username', senderLogin);
-  }
-
-  const { data: accounts, error: accountError } = await queryBuilder;
-  if (accountError) {
-    return res.status(500).json({ error: accountError.message, deliveryId });
-  }
-
-  const matched = Array.isArray(accounts) ? accounts : [];
-  if (!matched.length) {
-    return res.json({ ok: true, event, deliveryId, matchedAccounts: 0 });
-  }
-
-  for (const account of matched) {
-    const token = safeString(account.access_token);
-    const studentId = Number(account.student_id);
-    if (!token || !studentId) continue;
-    backgroundSyncStatus.set(studentId, {
-      inProgress: true,
-      startedAt: new Date().toISOString(),
-      lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
-      error: null
-    });
-
-    runGithubSync({ token, limit: 50, includePrivate: true, studentId })
-      .then(() => {
-        backgroundSyncStatus.set(studentId, {
-          inProgress: false,
-          lastSyncAt: new Date().toISOString(),
-          error: null
-        });
-      })
-      .catch((error) => {
-        backgroundSyncStatus.set(studentId, {
-          inProgress: false,
-          lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
-          error: error.message || 'Webhook-triggered sync failed'
-        });
-      });
-  }
-
-  return res.status(202).json({
-    ok: true,
-    event,
-    deliveryId,
-    matchedAccounts: matched.length,
-    autoSyncTriggered: true
-  });
-});
-
-app.use(express.json());
 
 const createAuthToken = (user) =>
   jwt.sign(
@@ -920,9 +813,15 @@ const persistGithubData = async (studentId, githubUser, repos, repoDetailsMap, i
             metadata: {
               stars: repo.stargazers_count,
               forks: repo.forks_count,
+              watchers: repo.watchers_count,
               language: repo.language,
               topics: repo.topics,
-              private: repo.private
+              private: repo.private,
+              pushed_at: repo.pushed_at,
+              created_at: repo.created_at,
+              open_issues: repo.open_issues_count,
+              default_branch: repo.default_branch,
+              full_name: repo.full_name
             }
           });
           
@@ -1060,7 +959,6 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const authUserId = crypto.randomUUID(); // Generate unique UUID for user
 
     // Insert new student into Supabase
     const { data: newStudent, error } = await supabase
@@ -1068,10 +966,9 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
       .insert({
         name,
         email,
-        password_hash: passwordHash,
-        auth_user_id: authUserId
+        password_hash: passwordHash
       })
-      .select('id, name, email, auth_user_id')
+      .select('id, name, email')
       .single();
 
     if (error) {
@@ -1096,8 +993,6 @@ app.post(`${API_PREFIX}/auth/register`, async (req, res) => {
 app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
   const email = safeString(req.body?.email).toLowerCase();
   const password = safeString(req.body?.password);
-  
-  console.log('LOGIN ATTEMPT:', email);
 
   if (!supabase) {
     return res.status(500).json({ error: 'Database not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' });
@@ -1107,11 +1002,9 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
     // Fetch student from Supabase by email
     const { data: student, error } = await supabase
       .from('students')
-      .select('id, name, email, password_hash, auth_user_id')
+      .select('id, name, email, password_hash')
       .eq('email', email)
       .single();
-    
-    console.log('Found student:', student?.id, 'auth_user_id:', student?.auth_user_id);
 
     if (error || !student) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -1122,161 +1015,10 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // If user doesn't have auth_user_id, generate one now (for existing users)
-    let authUserId = student.auth_user_id;
-    if (!authUserId) {
-      authUserId = crypto.randomUUID();
-      console.log('Generating auth_user_id for user:', student.id, 'UUID:', authUserId);
-      const { error: updateError } = await supabase
-        .from('students')
-        .update({ auth_user_id: authUserId })
-        .eq('id', student.id);
-      
-      if (updateError) {
-        console.error('Failed to update auth_user_id:', updateError);
-      } else {
-        console.log('Successfully updated auth_user_id for user:', student.id);
-      }
-    }
-
     const token = createAuthToken(student);
-    return res.json({ token, user: { id: student.id, name: student.name, email: student.email, auth_user_id: authUserId } });
+    return res.json({ token, user: { id: student.id, name: student.name, email: student.email } });
   } catch (err) {
     console.error('Login error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Categorize skill by name - returns category name and color
-const categorizeSkill = (skillName) => {
-  const name = (skillName || '').toLowerCase();
-  
-  // AI/ML category
-  if (/python|tensorflow|pytorch|keras|nlp|deep.?learning|machine.?learning|ai|neural|scikit|pandas|numpy/.test(name)) {
-    return { category: 'AI/ML', color: '#FF6B6B' }; // Red
-  }
-  
-  // Web category
-  if (/javascript|typescript|react|angular|vue|nodejs|express|html|css|webpack|next\.?js|nuxt|svelte|flutter|react.?native/.test(name)) {
-    return { category: 'Web', color: '#4ECDC4' }; // Teal
-  }
-  
-  // Cloud/DevOps category
-  if (/aws|azure|gcp|docker|kubernetes|ci\/cd|github|gitlab|jenkins|terraform|devops/.test(name)) {
-    return { category: 'Cloud/DevOps', color: '#FFE66D' }; // Yellow
-  }
-  
-  // Database category
-  if (/sql|postgres|mysql|mongodb|redis|elasticsearch|database|db/.test(name)) {
-    return { category: 'Database', color: '#95E1D3' }; // Mint
-  }
-  
-  // Core CS category
-  if (/java|c\+\+|c#|go|rust|algorithms|data.?structures|oop|design.?patterns|system.?design/.test(name)) {
-    return { category: 'Core CS', color: '#A8E6CF' }; // Light Green
-  }
-  
-  // Default category
-  return { category: 'Other', color: '#D4A5FF' }; // Purple
-};
-
-app.get(`${API_PREFIX}/graph/data`, authGuard, async (req, res) => {
-  if (!supabase) {
-    return res.json({ nodes: [], edges: [], categories: [] });
-  }
-
-  try {
-    const studentId = req.user.id;
-    const { filter } = req.query;
-
-    // Fetch student skills with proficiency scores
-    const { data: studentSkills, error: skillsError } = await supabase
-      .from('student_skills')
-      .select('skill_id, skill:skills(skill_id, name), proficiency_score, confidence_score')
-      .eq('student_id', studentId);
-
-    if (skillsError) {
-      console.error('Error fetching student skills:', skillsError);
-      return res.status(500).json({ error: 'Failed to fetch skills' });
-    }
-
-    if (!studentSkills || studentSkills.length === 0) {
-      return res.json({ nodes: [], edges: [], categories: [] });
-    }
-
-    // Fetch knowledge edges between skills
-    const skillIds = studentSkills.map(s => s.skill_id);
-    const { data: edges, error: edgesError } = await supabase
-      .from('knowledge_edges')
-      .select('id, source_id, target_id, source_type, target_type, relation_type, weight')
-      .in('source_id', skillIds)
-      .in('target_id', skillIds);
-
-    if (edgesError) {
-      console.error('Error fetching knowledge edges:', edgesError);
-    }
-
-    // Create nodes with categorization
-    const skillMap = new Map();
-    const nodes = studentSkills.map((s) => {
-      const skillName = s.skill?.name || `Skill ${s.skill_id}`;
-      const { category, color } = categorizeSkill(skillName);
-      
-      // Node size based on proficiency score (1-5 scale)
-      const size = 1 + (s.proficiency_score || 0) * 4;
-      const strength = s.proficiency_score || 0;
-      
-      const node = {
-        id: s.skill_id,
-        label: skillName,
-        category,
-        color,
-        size,
-        strength,
-        confidence: s.confidence_score || 0,
-        x: Math.random() * 100 - 50,
-        y: Math.random() * 100 - 50,
-        z: Math.random() * 100 - 50
-      };
-      
-      skillMap.set(s.skill_id, node);
-      return node;
-    });
-
-    // Filter nodes by category if specified
-    let filteredNodes = nodes;
-    if (filter && filter !== 'all') {
-      filteredNodes = nodes.filter(n => n.category === filter);
-    }
-
-    // Create edges, only including edges between filtered nodes
-    const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
-    const graphEdges = (edges || [])
-      .filter(e => filteredNodeIds.has(e.source_id) && filteredNodeIds.has(e.target_id))
-      .map(e => ({
-        id: e.id,
-        source: e.source_id,
-        target: e.target_id,
-        type: e.relation_type,
-        weight: e.weight || 1
-      }));
-
-    // Collect unique categories
-    const categories = [...new Set(filteredNodes.map(n => n.category))].sort();
-
-    return res.json({
-      nodes: filteredNodes,
-      edges: graphEdges,
-      categories,
-      metadata: {
-        totalSkills: nodes.length,
-        visualizedSkills: filteredNodes.length,
-        totalConnections: graphEdges.length,
-        studentId
-      }
-    });
-  } catch (err) {
-    console.error('Graph data error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1285,41 +1027,8 @@ app.get(`${API_PREFIX}/graph`, (req, res) => {
   res.json({ nodes: [], edges: [], filters: req.query || {} });
 });
 
-app.get(`${API_PREFIX}/graph/search`, async (req, res) => {
-  if (!supabase) {
-    return res.json({ query: safeString(req.query?.q), results: [] });
-  }
-
-  try {
-    const query = safeString(req.query?.q || '');
-    
-    if (query.length < 2) {
-      return res.json({ query, results: [] });
-    }
-
-    // Search skills
-    const { data: skills, error } = await supabase
-      .from('skills')
-      .select('skill_id, name')
-      .ilike('name', `%${query}%`)
-      .limit(20);
-
-    if (error) {
-      console.error('Search error:', error);
-      return res.json({ query, results: [] });
-    }
-
-    const results = (skills || []).map(s => ({
-      id: s.skill_id,
-      name: s.name,
-      type: 'skill'
-    }));
-
-    return res.json({ query, results });
-  } catch (err) {
-    console.error('Search error:', err);
-    return res.json({ query: req.query?.q, results: [] });
-  }
+app.get(`${API_PREFIX}/graph/search`, (req, res) => {
+  res.json({ query: safeString(req.query?.q), results: [] });
 });
 
 app.get(`${API_PREFIX}/graph/students`, async (req, res) => {
@@ -1683,10 +1392,10 @@ app.get(`${API_PREFIX}/integrations/github/data`, authGuard, async (req, res) =>
         .eq('student_id', req.user.id)
         .order('proficiency_score', { ascending: false }),
       
-      // Projects
+      // Projects with linked skills
       supabase
         .from('projects')
-        .select('id, name, description, url, metadata, last_synced_at')
+        .select('id, name, description, url, metadata, last_synced_at, project_skills(skill:skills(name))')
         .eq('student_id', req.user.id)
         .order('last_synced_at', { ascending: false }),
       
@@ -2293,118 +2002,6 @@ const runQueueWorkerOnce = async () => {
   }
 };
 
-const shouldSkipAutoSyncByRecentRun = async (studentId) => {
-  if (!supabase) return true;
-  const { data, error } = await supabase
-    .from('sync_runs')
-    .select('finished_at')
-    .eq('student_id', studentId)
-    .eq('provider', 'github')
-    .eq('status', 'success')
-    .order('finished_at', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (error || !data?.finished_at) return false;
-  const last = new Date(data.finished_at).getTime();
-  const now = Date.now();
-  return now - last < AUTO_SYNC_INTERVAL_MINUTES * 60 * 1000;
-};
-
-const runAutoGithubSyncSweep = async () => {
-  if (!supabase) return { scanned: 0, triggered: 0 };
-
-  const { data: accounts, error } = await supabase
-    .from('integration_accounts')
-    .select('student_id, access_token, external_username')
-    .eq('provider', 'github');
-
-  if (error) {
-    throw new Error(`Auto sync sweep failed: ${error.message}`);
-  }
-
-  const rows = Array.isArray(accounts) ? accounts : [];
-  let triggered = 0;
-
-  for (const account of rows) {
-    const studentId = Number(account.student_id);
-    const token = safeString(account.access_token);
-    if (!studentId || !token) continue;
-
-    const status = backgroundSyncStatus.get(studentId);
-    if (status?.inProgress) continue;
-
-    // eslint-disable-next-line no-await-in-loop
-    const skipByRecency = await shouldSkipAutoSyncByRecentRun(studentId);
-    if (skipByRecency) continue;
-
-    backgroundSyncStatus.set(studentId, {
-      inProgress: true,
-      startedAt: new Date().toISOString(),
-      lastSyncAt: status?.lastSyncAt || null,
-      error: null
-    });
-
-    runGithubSync({ token, limit: 50, includePrivate: true, studentId })
-      .then(() => {
-        backgroundSyncStatus.set(studentId, {
-          inProgress: false,
-          lastSyncAt: new Date().toISOString(),
-          error: null
-        });
-      })
-      .catch((syncError) => {
-        backgroundSyncStatus.set(studentId, {
-          inProgress: false,
-          lastSyncAt: backgroundSyncStatus.get(studentId)?.lastSyncAt || null,
-          error: syncError.message || 'Auto sweep sync failed'
-        });
-      });
-    triggered += 1;
-  }
-
-  return { scanned: rows.length, triggered };
-};
-
-const drainQueueBatch = async (maxJobs = QUEUE_DRAIN_BATCH) => {
-  let processed = 0;
-  for (let i = 0; i < maxJobs; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    const result = await runQueueWorkerOnce();
-    if (!result.processed) break;
-    processed += 1;
-  }
-  return { processed };
-};
-
-const startBackgroundSchedulers = () => {
-  if (!ENABLE_SYNC_JOBS) {
-    console.log('Background schedulers disabled via ENABLE_SYNC_JOBS=false');
-    return;
-  }
-
-  if (!cron.validate(SYNC_SCHEDULE)) {
-    console.error(`Invalid SYNC_SCHEDULE: "${SYNC_SCHEDULE}"`);
-    return;
-  }
-
-  cron.schedule(SYNC_SCHEDULE, async () => {
-    try {
-      const sweep = await runAutoGithubSyncSweep();
-      const queue = await drainQueueBatch(QUEUE_DRAIN_BATCH);
-      console.log(
-        `[scheduler] github_scanned=${sweep.scanned} github_triggered=${sweep.triggered} queue_processed=${queue.processed}`
-      );
-    } catch (error) {
-      console.error('[scheduler] tick failed:', error.message);
-    }
-  });
-
-  console.log(
-    `Background schedulers started (SYNC_SCHEDULE=${SYNC_SCHEDULE}, AUTO_SYNC_INTERVAL_MINUTES=${AUTO_SYNC_INTERVAL_MINUTES}, QUEUE_DRAIN_BATCH=${QUEUE_DRAIN_BATCH})`
-  );
-};
-
 app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, res) => {
   const token = await getGithubTokenForUser(req.user.id);
   if (!token) {
@@ -2436,122 +2033,6 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
       error: 'GitHub sync failed',
       details: error.response?.data || error.message
     });
-  }
-});
-
-// SSE Streaming endpoint for progressive GitHub sync
-app.get(`${API_PREFIX}/integrations/github/sync-stream`, authGuard, async (req, res) => {
-  try {
-    console.log('SYNC-STREAM endpoint hit, user:', req.user?.id);
-    const token = GITHUB_STATIC_TOKEN || await getGithubTokenForUser(req.user.id);
-    if (!token) {
-      console.log('SYNC-STREAM: No token found for user', req.user?.id);
-      return res.status(400).json({ error: 'GitHub not connected', needsOAuth: true });
-    }
-    console.log('SYNC-STREAM: Token found, starting stream for user', req.user?.id);
-
-    // Set up SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.flushHeaders();
-
-    const sendEvent = (event, data) => {
-      try {
-        res.write(`event: ${event}\n`);
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch (e) {
-        console.error('Error writing SSE event:', e.message);
-      }
-    };
-
-    const perPage = 30;
-    const client = githubClient(token);
-
-    try {
-      // Step 1: Fetch user info
-      sendEvent('status', { message: 'Fetching GitHub profile...' });
-      const meRes = await client.get('/user');
-      const githubUser = {
-        id: meRes.data?.id,
-        login: meRes.data?.login,
-        name: meRes.data?.name,
-        avatarUrl: meRes.data?.avatar_url,
-        profileUrl: meRes.data?.html_url,
-        publicRepos: meRes.data?.public_repos,
-        followers: meRes.data?.followers,
-        following: meRes.data?.following
-      };
-      sendEvent('user', githubUser);
-
-      // Step 2: Fetch repos list
-      sendEvent('status', { message: 'Fetching repository list...' });
-      const reposRes = await client.get('/user/repos', {
-        params: { sort: 'updated', direction: 'desc', per_page: perPage, visibility: 'all', affiliation: 'owner,collaborator,organization_member' }
-      });
-      const repos = Array.isArray(reposRes.data) ? reposRes.data : [];
-      sendEvent('repos_count', { total: repos.length });
-
-      // Step 3: Process each repo and stream it
-      const allRepoDetails = [];
-      const repoDetailsMap = new Map();
-      
-      for (let i = 0; i < repos.length; i++) {
-        const repo = repos[i];
-        sendEvent('status', { message: `Processing ${repo.name} (${i + 1}/${repos.length})...` });
-        
-        try {
-          const [languagesRes, commitsRes] = await Promise.all([
-            client.get(`/repos/${repo.owner.login}/${repo.name}/languages`),
-            client.get(`/repos/${repo.owner.login}/${repo.name}/commits`, { params: { per_page: 10 } })
-          ]);
-
-          const languages = languagesRes.data || {};
-          const commits = Array.isArray(commitsRes.data) ? commitsRes.data : [];
-          
-          repoDetailsMap.set(repo.id, { languages: Object.keys(languages), languageBytes: languages, commits });
-          
-          const repoSummary = toRepoSummary(repo, languages, commits.length);
-          allRepoDetails.push(repoSummary);
-          
-          // Stream each repo as it's processed
-          sendEvent('repo', { index: i, total: repos.length, repo: repoSummary });
-        } catch (error) {
-          repoDetailsMap.set(repo.id, { languages: [], languageBytes: {}, commits: [] });
-          const repoSummary = toRepoSummary(repo, {}, 0);
-          allRepoDetails.push(repoSummary);
-          sendEvent('repo', { index: i, total: repos.length, repo: repoSummary });
-        }
-      }
-
-      // Step 4: Infer skills
-      sendEvent('status', { message: 'Analyzing skills...' });
-      const inferredSkills = inferSkills(allRepoDetails);
-      sendEvent('skills', inferredSkills);
-
-      // Step 5: Persist to database
-      sendEvent('status', { message: 'Saving to database...' });
-      let dbStats = { savedRepos: 0, savedSkills: 0, savedProjects: 0, studentSkillsUpdated: 0 };
-      if (req.user.id) {
-        dbStats = await persistGithubData(req.user.id, githubUser, repos, repoDetailsMap, inferredSkills);
-      }
-
-      // Step 6: Done
-      sendEvent('complete', {
-        totals: { repositories: allRepoDetails.length, inferredSkills: inferredSkills.length },
-        dbStats
-      });
-      
-      res.end();
-    } catch (error) {
-      console.error('SYNC-STREAM error during processing:', error.message, error.response?.status);
-      sendEvent('error', { message: error.message || 'GitHub sync failed' });
-      res.end();
-    }
-  } catch (error) {
-    console.error('SYNC-STREAM outer error:', error.message);
-    res.status(500).json({ error: 'Failed to start GitHub sync', details: error.message });
   }
 });
 
@@ -2831,24 +2312,11 @@ app.post(`${API_PREFIX}/integrations/certifications/sync`, authGuard, async (req
   }
 });
 
-// Simple test endpoint to verify deployment
-app.get(`${API_PREFIX}/ping`, (req, res) => {
-  res.json({ pong: true, timestamp: new Date().toISOString(), version: '2.1.0-streaming' });
-});
-
-// Debug endpoint to test auth
-app.get(`${API_PREFIX}/debug/auth-test`, authGuard, (req, res) => {
-  res.json({ authenticated: true, userId: req.user?.id, timestamp: new Date().toISOString() });
-});
-
 app.use((req, res) => {
-  const logEntry = `404 for: ${req.method} ${req.path}`;
-  console.log(logEntry);
-  res.status(404).json({ error: 'Route not found', path: req.url, method: req.method, endpoint: req.path });
+  res.status(404).json({ error: 'Route not found' });
 });
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`SkillVista backend running on http://localhost:${PORT}${API_PREFIX}`);
-  startBackgroundSchedulers();
 });

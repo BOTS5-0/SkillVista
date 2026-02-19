@@ -1147,12 +1147,179 @@ app.post(`${API_PREFIX}/auth/login`, async (req, res) => {
   }
 });
 
+// Categorize skill by name - returns category name and color
+const categorizeSkill = (skillName) => {
+  const name = (skillName || '').toLowerCase();
+  
+  // AI/ML category
+  if (/python|tensorflow|pytorch|keras|nlp|deep.?learning|machine.?learning|ai|neural|scikit|pandas|numpy/.test(name)) {
+    return { category: 'AI/ML', color: '#FF6B6B' }; // Red
+  }
+  
+  // Web category
+  if (/javascript|typescript|react|angular|vue|nodejs|express|html|css|webpack|next\.?js|nuxt|svelte|flutter|react.?native/.test(name)) {
+    return { category: 'Web', color: '#4ECDC4' }; // Teal
+  }
+  
+  // Cloud/DevOps category
+  if (/aws|azure|gcp|docker|kubernetes|ci\/cd|github|gitlab|jenkins|terraform|devops/.test(name)) {
+    return { category: 'Cloud/DevOps', color: '#FFE66D' }; // Yellow
+  }
+  
+  // Database category
+  if (/sql|postgres|mysql|mongodb|redis|elasticsearch|database|db/.test(name)) {
+    return { category: 'Database', color: '#95E1D3' }; // Mint
+  }
+  
+  // Core CS category
+  if (/java|c\+\+|c#|go|rust|algorithms|data.?structures|oop|design.?patterns|system.?design/.test(name)) {
+    return { category: 'Core CS', color: '#A8E6CF' }; // Light Green
+  }
+  
+  // Default category
+  return { category: 'Other', color: '#D4A5FF' }; // Purple
+};
+
+app.get(`${API_PREFIX}/graph/data`, authGuard, async (req, res) => {
+  if (!supabase) {
+    return res.json({ nodes: [], edges: [], categories: [] });
+  }
+
+  try {
+    const studentId = req.user.id;
+    const { filter } = req.query;
+
+    // Fetch student skills with proficiency scores
+    const { data: studentSkills, error: skillsError } = await supabase
+      .from('student_skills')
+      .select('skill_id, skill:skills(skill_id, name), proficiency_score, confidence_score')
+      .eq('student_id', studentId);
+
+    if (skillsError) {
+      console.error('Error fetching student skills:', skillsError);
+      return res.status(500).json({ error: 'Failed to fetch skills' });
+    }
+
+    if (!studentSkills || studentSkills.length === 0) {
+      return res.json({ nodes: [], edges: [], categories: [] });
+    }
+
+    // Fetch knowledge edges between skills
+    const skillIds = studentSkills.map(s => s.skill_id);
+    const { data: edges, error: edgesError } = await supabase
+      .from('knowledge_edges')
+      .select('id, source_id, target_id, source_type, target_type, relation_type, weight')
+      .in('source_id', skillIds)
+      .in('target_id', skillIds);
+
+    if (edgesError) {
+      console.error('Error fetching knowledge edges:', edgesError);
+    }
+
+    // Create nodes with categorization
+    const skillMap = new Map();
+    const nodes = studentSkills.map((s) => {
+      const skillName = s.skill?.name || `Skill ${s.skill_id}`;
+      const { category, color } = categorizeSkill(skillName);
+      
+      // Node size based on proficiency score (1-5 scale)
+      const size = 1 + (s.proficiency_score || 0) * 4;
+      const strength = s.proficiency_score || 0;
+      
+      const node = {
+        id: s.skill_id,
+        label: skillName,
+        category,
+        color,
+        size,
+        strength,
+        confidence: s.confidence_score || 0,
+        x: Math.random() * 100 - 50,
+        y: Math.random() * 100 - 50,
+        z: Math.random() * 100 - 50
+      };
+      
+      skillMap.set(s.skill_id, node);
+      return node;
+    });
+
+    // Filter nodes by category if specified
+    let filteredNodes = nodes;
+    if (filter && filter !== 'all') {
+      filteredNodes = nodes.filter(n => n.category === filter);
+    }
+
+    // Create edges, only including edges between filtered nodes
+    const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
+    const graphEdges = (edges || [])
+      .filter(e => filteredNodeIds.has(e.source_id) && filteredNodeIds.has(e.target_id))
+      .map(e => ({
+        id: e.id,
+        source: e.source_id,
+        target: e.target_id,
+        type: e.relation_type,
+        weight: e.weight || 1
+      }));
+
+    // Collect unique categories
+    const categories = [...new Set(filteredNodes.map(n => n.category))].sort();
+
+    return res.json({
+      nodes: filteredNodes,
+      edges: graphEdges,
+      categories,
+      metadata: {
+        totalSkills: nodes.length,
+        visualizedSkills: filteredNodes.length,
+        totalConnections: graphEdges.length,
+        studentId
+      }
+    });
+  } catch (err) {
+    console.error('Graph data error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.get(`${API_PREFIX}/graph`, (req, res) => {
   res.json({ nodes: [], edges: [], filters: req.query || {} });
 });
 
-app.get(`${API_PREFIX}/graph/search`, (req, res) => {
-  res.json({ query: safeString(req.query?.q), results: [] });
+app.get(`${API_PREFIX}/graph/search`, async (req, res) => {
+  if (!supabase) {
+    return res.json({ query: safeString(req.query?.q), results: [] });
+  }
+
+  try {
+    const query = safeString(req.query?.q || '');
+    
+    if (query.length < 2) {
+      return res.json({ query, results: [] });
+    }
+
+    // Search skills
+    const { data: skills, error } = await supabase
+      .from('skills')
+      .select('skill_id, name')
+      .ilike('name', `%${query}%`)
+      .limit(20);
+
+    if (error) {
+      console.error('Search error:', error);
+      return res.json({ query, results: [] });
+    }
+
+    const results = (skills || []).map(s => ({
+      id: s.skill_id,
+      name: s.name,
+      type: 'skill'
+    }));
+
+    return res.json({ query, results });
+  } catch (err) {
+    console.error('Search error:', err);
+    return res.json({ query: req.query?.q, results: [] });
+  }
 });
 
 app.get(`${API_PREFIX}/graph/students`, async (req, res) => {

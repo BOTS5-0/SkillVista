@@ -244,6 +244,27 @@ class SkillVistaAPI {
     });
   }
 
+  async getKnowledgeGraphData(filter?: string): Promise<{
+    nodes: any[];
+    edges: any[];
+    categories: string[];
+    metadata: any;
+  }> {
+    const url = filter ? `/graph/data?filter=${encodeURIComponent(filter)}` : '/graph/data';
+    return this.request(url, {
+      method: 'GET',
+    });
+  }
+
+  async searchSkills(query: string): Promise<{
+    query: string;
+    results: any[];
+  }> {
+    return this.request(`/graph/search?q=${encodeURIComponent(query)}`, {
+      method: 'GET',
+    });
+  }
+
   async logout() {
     await AsyncStorage.removeItem(AUTH_TOKEN_KEY);
     await AsyncStorage.removeItem(USER_DATA_KEY);

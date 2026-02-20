@@ -179,9 +179,9 @@ export const HomeScreen: React.FC = () => {
 
           {githubData?.inferredSkills && githubData.inferredSkills.length > 0 && (
             <View style={styles.skillsContainer}>
-              <Text style={styles.sectionTitle}>Top Skills</Text>
+              <Text style={styles.sectionTitle}>All Skills</Text>
               <View style={styles.skillsList}>
-                {githubData.inferredSkills.slice(0, 6).map((skill, idx) => (
+                {githubData.inferredSkills.map((skill, idx) => (
                   // @ts-ignore - key is valid prop in React
                   <View key={`skill-${idx}`} style={styles.skillBadge}>
                     <Text style={styles.skillText}>{skill.skill}</Text>

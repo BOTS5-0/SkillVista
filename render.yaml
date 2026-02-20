@@ -2,10 +2,9 @@ services:
   - type: web
     name: skillvista
     runtime: node
-    buildCommand: npm ci --legacy-peer-deps
+    rootDir: backend
+    buildCommand: npm install --legacy-peer-deps
     startCommand: node server.js
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000

@@ -46,7 +46,7 @@ export const MapScreen: React.FC = () => {
         }
 
         // Fetch student graph from backend
-        const graphResponse = await api.getStudentGraph(storedUser.id);
+        const graphResponse = await api.getStudentGraph(storedUser.id, 2, 100);
 
         const graphData = (() => {
           // Backward-compatible path if backend returns full nodes/edges shape.

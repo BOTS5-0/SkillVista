@@ -215,7 +215,7 @@ class SkillVistaAPI {
     });
   }
 
-  async syncGitHubRepos(includePrivate = false, limit = 30): Promise<GitHubSyncResponse> {
+  async syncGitHubRepos(includePrivate = true, limit = 100): Promise<GitHubSyncResponse> {
     return this.request('/integrations/github/sync', {
       method: 'POST',
       body: JSON.stringify({ includePrivate, limit }),
@@ -223,8 +223,8 @@ class SkillVistaAPI {
   }
 
   async syncGitHubReposOAuth(
-    includePrivate = false,
-    limit = 30
+    includePrivate = true,
+    limit = 100
   ): Promise<GitHubSyncResponse> {
     return this.request('/integrations/github/oauth/sync', {
       method: 'POST',
@@ -289,7 +289,7 @@ class SkillVistaAPI {
   async getStudentGraph(
     studentId: string | number,
     depth: number = 2,
-    seedLimit: number = 40
+    seedLimit: number = 100
   ): Promise<{
     nodes?: Array<{
       id: string | number;

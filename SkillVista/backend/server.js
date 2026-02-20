@@ -169,6 +169,9 @@ const SKILL_ALIASES = {
   'scikitlearn': 'scikit-learn',
   'postgres': 'postgresql',
   'mongo': 'mongodb',
+  'jupyter-notebook': 'jupyter',
+  'jupyter-nb': 'jupyter',
+  'nb': 'notebook',
   'github-actions': 'github-actions',
   cicd: 'ci/cd'
 };
@@ -317,17 +320,48 @@ const inferSkills = (repos) => {
   }
 
   const WEAK_GENERIC_TERMS = new Set(['ai', 'ml', 'llm', 'gpt', 'github', 'gitlab', 'bitbucket', 'rest', 'restful']);
+  const HARD_BLOCK_TERMS = new Set([
+    'ai',
+    'llm',
+    'gpt',
+    'jupyter',
+    'notebook',
+    'jupyter-nb',
+    'github',
+    'gitlab',
+    'bitbucket',
+    'api',
+    'apis'
+  ]);
   const CORE_KEEP = new Set(['mongodb', 'fastapi', 'git', 'docker', 'kubernetes', 'postgresql', 'mysql', 'redis']);
 
-  return [...counts.entries()]
+  const ranked = [...counts.entries()]
     .filter(([skill, score]) => {
+      if (HARD_BLOCK_TERMS.has(skill)) return false;
       if (CORE_KEEP.has(skill)) return true;
       if (WEAK_GENERIC_TERMS.has(skill)) return score >= 4;
       return score >= 1.5;
     })
     .map(([skill, score]) => ({ skill, score }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 50);
+    .sort((a, b) => b.score - a.score);
+
+  // Keep results rich; if strict filters produce too few, backfill with best non-noisy skills.
+  if (ranked.length < 30) {
+    const existing = new Set(ranked.map((item) => item.skill));
+    const backfill = [...counts.entries()]
+      .filter(([skill, score]) => {
+        if (existing.has(skill)) return false;
+        if (HARD_BLOCK_TERMS.has(skill)) return false;
+        if (skill.length < 2) return false;
+        return score >= 1;
+      })
+      .map(([skill, score]) => ({ skill, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 30 - ranked.length);
+    ranked.push(...backfill);
+  }
+
+  return ranked.slice(0, 80);
 };
 
 const toRepoSummary = (repo, languageMap, commitCount) => ({
@@ -727,7 +761,7 @@ const updateStudentSkills = async (studentId, inferredSkills, repoDetailsMap, re
   }
 
   // Remove stale generic labels if they are not currently inferred.
-  const genericNoiseSkills = ['ai', 'ml', 'llm', 'gpt'];
+  const genericNoiseSkills = ['ai', 'ml', 'llm', 'gpt', 'jupyter', 'notebook', 'jupyter-nb', 'api', 'apis'];
   for (const label of genericNoiseSkills) {
     if (inferredSet.has(label)) continue;
     try {
@@ -2257,9 +2291,13 @@ app.get(`${API_PREFIX}/students/:studentId/graph`, authGuard, async (req, res) =
       .limit(seedLimit);
 
     if (skillError) throw new Error(skillError.message);
+    const blockedSeedSkills = new Set(['ai', 'ml', 'llm', 'gpt', 'jupyter', 'jupyter-nb', 'notebook', 'api', 'apis']);
+    const filteredSeedSkills = (seedSkills || []).filter(
+      (row) => !blockedSeedSkills.has((row.skills?.name || '').toLowerCase().trim())
+    );
 
     const edges = [];
-    for (const skill of seedSkills || []) {
+    for (const skill of filteredSeedSkills) {
       // eslint-disable-next-line no-await-in-loop
       const { data: traversal, error } = await supabase.rpc('get_related_nodes', {
         input_source_id: skill.skill_id,
@@ -2271,7 +2309,7 @@ app.get(`${API_PREFIX}/students/:studentId/graph`, authGuard, async (req, res) =
       edges.push(...(traversal || []));
     }
 
-    return res.json({ studentId, depth, seedSkills: seedSkills || [], edges });
+    return res.json({ studentId, depth, seedSkills: filteredSeedSkills, edges });
   } catch (error) {
     return res.status(502).json({ error: 'Failed to fetch graph', details: error.message });
   }

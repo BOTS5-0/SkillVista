@@ -41,6 +41,8 @@ const usersByEmail = new Map();
 const usersById = new Map();
 const pendingGithubStates = new Map();
 const githubTokensByUserId = new Map(); // fallback if Supabase not configured
+const repoDeepScanCache = new Map();
+const REPO_SCAN_CACHE_MAX = 600;
 
 // Trust proxy for Render (needed for rate limiting behind reverse proxy)
 app.set('trust proxy', 1);
@@ -103,48 +105,470 @@ const githubClient = (token) =>
     }
   });
 
-const inferSkills = (repos) => {
-  const counts = new Map();
+const normalizeSkillToken = (raw) =>
+  safeString(raw)
+    .toLowerCase()
+    .trim()
+    .replace(/[_\s]+/g, '-')
+    .replace(/[^\w.+#/-]/g, '');
 
-  const bump = (raw) => {
-    const value = safeString(raw).toLowerCase();
-    if (!value) return;
-    counts.set(value, (counts.get(value) || 0) + 1);
+const SKILL_ALIASES = {
+  cpp: 'c++',
+  'c-plus-plus': 'c++',
+  node: 'node.js',
+  nodejs: 'node.js',
+  reactnative: 'react-native',
+  nextjs: 'next.js',
+  vuejs: 'vue.js',
+  expressjs: 'express',
+  nestjs: 'nest.js',
+  mongo: 'mongodb',
+  'jupyter-notebook': 'jupyter',
+  'jupyter-nb': 'jupyter',
+  nb: 'notebook',
+  postgres: 'postgresql',
+  ts: 'typescript',
+  js: 'javascript',
+  cicd: 'ci/cd'
+};
+
+const canonicalSkillName = (raw) => {
+  const normalized = normalizeSkillToken(raw);
+  return SKILL_ALIASES[normalized] || normalized;
+};
+
+const SKILL_KEYWORDS = [
+  // Languages
+  'javascript', 'typescript', 'python', 'java', 'c#', 'c++', 'go', 'rust', 'php', 'ruby', 'swift', 'kotlin', 'sql',
+  // Frontend
+  'react', 'next.js', 'vue.js', 'angular', 'svelte', 'tailwind', 'bootstrap', 'mui',
+  // Backend
+  'node.js', 'express', 'nest.js', 'fastapi', 'flask', 'django', 'spring', '.net', 'graphql', 'grpc',
+  // Databases
+  'mongodb', 'postgresql', 'mysql', 'sqlite', 'redis', 'supabase', 'firebase', 'dynamodb',
+  // Cloud/Infra/DevOps
+  'docker', 'kubernetes', 'aws', 'azure', 'gcp', 'cloudflare', 'vercel', 'netlify', 'terraform', 'ansible',
+  // Tooling
+  'git', 'github-actions', 'gitlab-ci', 'jest', 'pytest', 'playwright', 'cypress', 'webpack', 'vite', 'npm', 'yarn', 'pnpm',
+  // Data/AI
+  'pandas', 'numpy', 'scikit-learn', 'tensorflow', 'pytorch', 'langchain', 'openai'
+];
+
+const MANIFEST_FILE_NAMES = new Set([
+  'package.json',
+  'requirements.txt',
+  'pyproject.toml',
+  'poetry.lock',
+  'pipfile',
+  'pipfile.lock',
+  'pom.xml',
+  'build.gradle',
+  'build.gradle.kts',
+  'cargo.toml',
+  'go.mod',
+  'composer.json',
+  'composer.lock',
+  'gemfile',
+  'gemfile.lock',
+  'mix.exs',
+  'pubspec.yaml',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'go.sum',
+  'cargo.lock',
+  'dockerfile',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+  '.tool-versions',
+  '.nvmrc'
+]);
+
+const SOURCE_FILE_EXTENSIONS = new Set([
+  '.js', '.jsx', '.ts', '.tsx',
+  '.py',
+  '.go',
+  '.java', '.kt', '.kts',
+  '.cs',
+  '.rb',
+  '.php'
+]);
+
+const DEPENDENCY_NAME_HINTS = {
+  'react': 'react',
+  'next': 'next.js',
+  'nextjs': 'next.js',
+  'vue': 'vue.js',
+  'nuxt': 'nuxt.js',
+  'angular': 'angular',
+  'svelte': 'svelte',
+  'tailwindcss': 'tailwind',
+  '@mui': 'mui',
+  'bootstrap': 'bootstrap',
+  'express': 'express',
+  'fastapi': 'fastapi',
+  'flask': 'flask',
+  'django': 'django',
+  'nestjs': 'nest.js',
+  'typeorm': 'typeorm',
+  'prisma': 'prisma',
+  'mongoose': 'mongoose',
+  'sqlalchemy': 'sqlalchemy',
+  'postgres': 'postgresql',
+  'psycopg': 'postgresql',
+  'mysql': 'mysql',
+  'sqlite': 'sqlite',
+  'mongodb': 'mongodb',
+  'pymongo': 'mongodb',
+  'redis': 'redis',
+  'kafka': 'kafka',
+  'rabbitmq': 'rabbitmq',
+  'graphql': 'graphql',
+  'apollo': 'apollo',
+  'grpc': 'grpc',
+  'docker': 'docker',
+  'kubernetes': 'kubernetes',
+  'helm': 'helm',
+  'terraform': 'terraform',
+  'ansible': 'ansible',
+  'aws': 'aws',
+  '@aws-sdk': 'aws',
+  'boto3': 'aws',
+  'azure': 'azure',
+  'google-cloud': 'gcp',
+  'firebase': 'firebase',
+  'supabase': 'supabase',
+  'cloudflare': 'cloudflare',
+  'vercel': 'vercel',
+  'netlify': 'netlify',
+  'jest': 'jest',
+  'pytest': 'pytest',
+  'playwright': 'playwright',
+  'cypress': 'cypress',
+  'vitest': 'vitest',
+  'webpack': 'webpack',
+  'vite': 'vite',
+  'eslint': 'eslint',
+  'prettier': 'prettier',
+  'typescript': 'typescript',
+  'javascript': 'javascript',
+  'python': 'python',
+  'java': 'java',
+  'go': 'go',
+  'rust': 'rust',
+  'tensorflow': 'tensorflow',
+  'torch': 'pytorch',
+  'pytorch': 'pytorch',
+  'scikit-learn': 'scikit-learn',
+  'numpy': 'numpy',
+  'pandas': 'pandas',
+  'langchain': 'langchain',
+  'openai': 'openai'
+};
+
+const extractSkillHintsFromDependencyName = (name) => {
+  const dep = normalizeSkillToken(name);
+  if (!dep) return [];
+  const hints = new Set();
+  Object.entries(DEPENDENCY_NAME_HINTS).forEach(([needle, skill]) => {
+    if (dep.includes(needle)) hints.add(skill);
+  });
+  return [...hints];
+};
+
+const parseManifestSignals = (fileName, content) => {
+  const signals = [];
+  const loweredFile = safeString(fileName).toLowerCase();
+  const text = safeString(content);
+  if (!text) return signals;
+
+  if (loweredFile === 'package.json') {
+    try {
+      const json = JSON.parse(text);
+      const depGroups = [
+        json.dependencies || {},
+        json.devDependencies || {},
+        json.peerDependencies || {},
+        json.optionalDependencies || {}
+      ];
+      depGroups.forEach((deps) => {
+        Object.keys(deps).forEach((name) => {
+          extractSkillHintsFromDependencyName(name).forEach((skill) => signals.push(skill));
+        });
+      });
+    } catch (e) {
+      // ignore malformed package.json
+    }
+  } else if (['requirements.txt', 'pipfile', 'pipfile.lock', 'pyproject.toml', 'poetry.lock'].includes(loweredFile)) {
+    const pkgPattern = /([a-zA-Z0-9._-]+)(?:\[.*?\])?\s*(?:==|>=|<=|~=|>|<|=)?/g;
+    let match = pkgPattern.exec(text);
+    while (match) {
+      extractSkillHintsFromDependencyName(match[1]).forEach((skill) => signals.push(skill));
+      match = pkgPattern.exec(text);
+    }
+  } else if (['go.mod', 'cargo.toml', 'composer.json', 'gemfile', 'mix.exs', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'pubspec.yaml'].includes(loweredFile)) {
+    const tokenPattern = /[a-zA-Z0-9@._/-]{3,}/g;
+    const tokens = text.match(tokenPattern) || [];
+    tokens.forEach((token) => {
+      extractSkillHintsFromDependencyName(token).forEach((skill) => signals.push(skill));
+    });
+  } else if (loweredFile === 'package-lock.json') {
+    try {
+      const json = JSON.parse(text);
+      if (json && typeof json === 'object') {
+        const topDeps = json.dependencies && typeof json.dependencies === 'object' ? Object.keys(json.dependencies) : [];
+        topDeps.forEach((dep) => {
+          extractSkillHintsFromDependencyName(dep).forEach((skill) => signals.push(skill));
+        });
+        const packages = json.packages && typeof json.packages === 'object' ? Object.keys(json.packages) : [];
+        packages.forEach((pkgPath) => {
+          const parts = pkgPath.split('node_modules/');
+          const depName = parts[parts.length - 1];
+          if (!depName) return;
+          extractSkillHintsFromDependencyName(depName).forEach((skill) => signals.push(skill));
+        });
+      }
+    } catch (e) {
+      // ignore malformed lock file
+    }
+  } else if (loweredFile === 'pnpm-lock.yaml' || loweredFile === 'yarn.lock') {
+    const depPattern = /(?:^|\n)\s*['"]?(@?[\w.-]+(?:\/[\w.-]+)?)@/g;
+    let match = depPattern.exec(text);
+    while (match) {
+      extractSkillHintsFromDependencyName(match[1]).forEach((skill) => signals.push(skill));
+      match = depPattern.exec(text);
+    }
+  } else if (loweredFile === 'poetry.lock') {
+    const poetryPattern = /name\s*=\s*["']([^"']+)["']/g;
+    let match = poetryPattern.exec(text);
+    while (match) {
+      extractSkillHintsFromDependencyName(match[1]).forEach((skill) => signals.push(skill));
+      match = poetryPattern.exec(text);
+    }
+  } else if (loweredFile === 'cargo.lock') {
+    const cargoPattern = /name\s*=\s*"([^"]+)"/g;
+    let match = cargoPattern.exec(text);
+    while (match) {
+      extractSkillHintsFromDependencyName(match[1]).forEach((skill) => signals.push(skill));
+      match = cargoPattern.exec(text);
+    }
+  } else if (loweredFile === 'go.sum') {
+    const goPattern = /^([^\s]+)\s+/gm;
+    let match = goPattern.exec(text);
+    while (match) {
+      const moduleName = match[1].split('/').slice(0, 2).join('/');
+      extractSkillHintsFromDependencyName(moduleName).forEach((skill) => signals.push(skill));
+      match = goPattern.exec(text);
+    }
+  } else if (loweredFile.startsWith('dockerfile') || loweredFile.includes('docker-compose')) {
+    signals.push('docker');
+    if (/kubernetes|helm/i.test(text)) signals.push('kubernetes');
+  }
+
+  if (/github-actions|workflow_dispatch|runs-on:/i.test(text)) signals.push('github-actions');
+  if (/terraform|provider\s+"aws"|provider\s+"google"|provider\s+"azurerm"/i.test(text)) signals.push('terraform');
+
+  return signals;
+};
+
+const hasSourceExtension = (filePath) => {
+  const lowered = safeString(filePath).toLowerCase();
+  for (const ext of SOURCE_FILE_EXTENSIONS) {
+    if (lowered.endsWith(ext)) return true;
+  }
+  return false;
+};
+
+const canonicalImportModule = (raw) => {
+  const mod = safeString(raw).trim().replace(/^['"]|['"]$/g, '');
+  if (!mod || mod.startsWith('.') || mod.startsWith('/')) return '';
+  if (mod.startsWith('@')) {
+    const parts = mod.split('/');
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : mod;
+  }
+  if (mod.includes('.')) {
+    // Python / Java package style: keep root package for skill hinting.
+    return mod.split('.')[0];
+  }
+  return mod.split('/')[0];
+};
+
+const parseSourceImportSignals = (filePath, content) => {
+  const signals = [];
+  const loweredPath = safeString(filePath).toLowerCase();
+  const text = safeString(content);
+  if (!text) return signals;
+
+  const addModuleHints = (moduleName) => {
+    const canonicalModule = canonicalImportModule(moduleName);
+    if (!canonicalModule) return;
+    extractSkillHintsFromDependencyName(canonicalModule).forEach((skill) => signals.push(skill));
   };
 
-  for (const repo of repos) {
-    bump(repo.language);
-    if (Array.isArray(repo.topics)) {
-      for (const topic of repo.topics) bump(topic);
+  if (/\.(js|jsx|ts|tsx)$/.test(loweredPath)) {
+    const fromRe = /\bfrom\s+['"]([^'"]+)['"]/g;
+    const requireRe = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/g;
+    const importRe = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g;
+    let m = fromRe.exec(text);
+    while (m) {
+      addModuleHints(m[1]);
+      m = fromRe.exec(text);
     }
-
-    const description = `${safeString(repo.name)} ${safeString(repo.description)}`.toLowerCase();
-    const keywords = [
-      'react',
-      'node',
-      'express',
-      'next',
-      'typescript',
-      'javascript',
-      'python',
-      'java',
-      'go',
-      'docker',
-      'kubernetes',
-      'graphql',
-      'postgres',
-      'mongodb'
-    ];
-
-    for (const keyword of keywords) {
-      if (description.includes(keyword)) bump(keyword);
+    m = requireRe.exec(text);
+    while (m) {
+      addModuleHints(m[1]);
+      m = requireRe.exec(text);
+    }
+    m = importRe.exec(text);
+    while (m) {
+      addModuleHints(m[1]);
+      m = importRe.exec(text);
+    }
+  } else if (/\.py$/.test(loweredPath)) {
+    const importRe = /^\s*import\s+([a-zA-Z0-9_.,\s]+)/gm;
+    const fromRe = /^\s*from\s+([a-zA-Z0-9_.]+)\s+import\s+/gm;
+    let m = importRe.exec(text);
+    while (m) {
+      m[1].split(',').forEach((mod) => addModuleHints(mod.trim()));
+      m = importRe.exec(text);
+    }
+    m = fromRe.exec(text);
+    while (m) {
+      addModuleHints(m[1]);
+      m = fromRe.exec(text);
+    }
+  } else if (/\.go$/.test(loweredPath)) {
+    const importRe = /import\s+(?:\([\s\S]*?\)|"[^"]+")/g;
+    const quotedRe = /"([^"]+)"/g;
+    const blocks = text.match(importRe) || [];
+    blocks.forEach((block) => {
+      let m = quotedRe.exec(block);
+      while (m) {
+        addModuleHints(m[1]);
+        m = quotedRe.exec(block);
+      }
+    });
+  } else if (/\.(java|kt|kts|cs)$/.test(loweredPath)) {
+    const importRe = /^\s*import\s+([a-zA-Z0-9_.*]+)\s*;?/gm;
+    const usingRe = /^\s*using\s+([a-zA-Z0-9_.]+)\s*;?/gm;
+    let m = importRe.exec(text);
+    while (m) {
+      addModuleHints(m[1].replace(/\*$/, ''));
+      m = importRe.exec(text);
+    }
+    m = usingRe.exec(text);
+    while (m) {
+      addModuleHints(m[1]);
+      m = usingRe.exec(text);
     }
   }
 
-  return [...counts.entries()]
+  return signals;
+};
+
+const decodeGitHubFileContent = (payload) => {
+  if (!payload || typeof payload !== 'object') return '';
+  if (payload.encoding === 'base64' && typeof payload.content === 'string') {
+    try {
+      return Buffer.from(payload.content.replace(/\n/g, ''), 'base64').toString('utf8');
+    } catch (e) {
+      return '';
+    }
+  }
+  if (typeof payload.content === 'string') return payload.content;
+  return '';
+};
+
+const getRepoScanCacheKey = (repo) =>
+  `${repo.owner?.login || 'unknown'}/${repo.name}:${repo.default_branch || 'main'}:${repo.pushed_at || repo.updated_at || ''}`;
+
+const getRepoScanCache = (key) => repoDeepScanCache.get(key) || null;
+
+const setRepoScanCache = (key, value) => {
+  if (!key) return;
+  repoDeepScanCache.set(key, { ...value, cachedAt: Date.now() });
+  if (repoDeepScanCache.size <= REPO_SCAN_CACHE_MAX) return;
+  const oldestKey = repoDeepScanCache.keys().next().value;
+  if (oldestKey) repoDeepScanCache.delete(oldestKey);
+};
+
+const inferSkills = (repos) => {
+  const counts = new Map();
+
+  const bump = (raw, weight = 1) => {
+    const value = canonicalSkillName(raw);
+    if (!value) return;
+    counts.set(value, (counts.get(value) || 0) + weight);
+  };
+
+  for (const repo of repos) {
+    bump(repo.language, 2.5);
+    if (Array.isArray(repo.languages)) {
+      for (const language of repo.languages) bump(language, 2.75);
+    }
+    if (Array.isArray(repo.topics)) {
+      for (const topic of repo.topics) bump(topic, 3.25);
+    }
+    if (Array.isArray(repo.manifestSignals)) {
+      for (const signal of repo.manifestSignals) bump(signal, 4.5);
+    }
+    if (Array.isArray(repo.importSignals)) {
+      for (const signal of repo.importSignals) bump(signal, 3.5);
+    }
+
+    const repoText = `${safeString(repo.name)} ${safeString(repo.fullName)} ${safeString(repo.description)} ${safeString(repo.scanText)}`.toLowerCase();
+    for (const keyword of SKILL_KEYWORDS) {
+      const normalizedKeyword = keyword.toLowerCase();
+      if (
+        repoText.includes(normalizedKeyword) ||
+        repoText.includes(normalizedKeyword.replace(/\./g, '')) ||
+        repoText.includes(normalizedKeyword.replace(/-/g, ' '))
+      ) {
+        bump(keyword, 1.25);
+      }
+    }
+  }
+
+  const GENERIC_NOISE = new Set(['ai', 'ml', 'llm', 'gpt', 'rest', 'restful']);
+  const HARD_BLOCK_TERMS = new Set([
+    'ai',
+    'llm',
+    'gpt',
+    'jupyter',
+    'notebook',
+    'jupyter-nb',
+    'github',
+    'gitlab',
+    'bitbucket',
+    'api',
+    'apis'
+  ]);
+
+  const ranked = [...counts.entries()]
+    .filter(([skill, score]) => {
+      if (HARD_BLOCK_TERMS.has(skill)) return false;
+      if (GENERIC_NOISE.has(skill)) return score >= 4;
+      return score >= 1.5;
+    })
     .map(([skill, score]) => ({ skill, score }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 30);
+    .sort((a, b) => b.score - a.score);
+
+  if (ranked.length < 30) {
+    const existing = new Set(ranked.map((item) => item.skill));
+    const backfill = [...counts.entries()]
+      .filter(([skill, score]) => {
+        if (existing.has(skill)) return false;
+        if (HARD_BLOCK_TERMS.has(skill)) return false;
+        if (skill.length < 2) return false;
+        return score >= 1;
+      })
+      .map(([skill, score]) => ({ skill, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 30 - ranked.length);
+    ranked.push(...backfill);
+  }
+
+  return ranked.slice(0, 100);
 };
 
 const toRepoSummary = (repo, languageMap, commitCount) => ({
@@ -709,7 +1133,7 @@ app.get(`${API_PREFIX}/integrations/github/oauth/callback`, async (req, res) => 
 });
 
 const runGithubSync = async ({ token, limit, includePrivate }) => {
-  const perPage = Math.min(Math.max(Number(limit) || 30, 1), 100);
+  const perPage = Math.min(Math.max(Number(limit) || 100, 1), 100);
   const visibility = includePrivate ? 'all' : 'public';
   const client = githubClient(token);
 
@@ -729,7 +1153,7 @@ const runGithubSync = async ({ token, limit, includePrivate }) => {
   const repos = Array.isArray(reposRes.data) ? reposRes.data : [];
 
   const repoDetails = await Promise.all(
-    repos.map(async (repo) => {
+    repos.map(async (repo, index) => {
       try {
         const [languagesRes, commitsRes] = await Promise.all([
           client.get(`/repos/${repo.owner.login}/${repo.name}/languages`),
@@ -738,9 +1162,100 @@ const runGithubSync = async ({ token, limit, includePrivate }) => {
 
         const languages = languagesRes.data || {};
         const commitCount = Array.isArray(commitsRes.data) ? commitsRes.data.length : 0;
-        return toRepoSummary(repo, languages, commitCount);
+
+        // Deep scan only top repos to stay within API budget while maximizing signal quality.
+        const enableDeepScan = index < 35;
+        const manifestSignals = [];
+        const importSignals = [];
+        const scanTextParts = [];
+
+        if (enableDeepScan) {
+          const cacheKey = getRepoScanCacheKey(repo);
+          const cachedScan = getRepoScanCache(cacheKey);
+          if (cachedScan) {
+            (cachedScan.manifestSignals || []).forEach((s) => manifestSignals.push(s));
+            (cachedScan.importSignals || []).forEach((s) => importSignals.push(s));
+            if (cachedScan.scanText) scanTextParts.push(cachedScan.scanText);
+          } else {
+            try {
+              const treeRes = await client.get(
+                `/repos/${repo.owner.login}/${repo.name}/git/trees/${encodeURIComponent(repo.default_branch)}?recursive=1`
+              );
+              const treeEntries = Array.isArray(treeRes.data?.tree) ? treeRes.data.tree : [];
+
+              const manifestCandidates = treeEntries
+                .filter((entry) => entry?.type === 'blob' && !!entry.path)
+                .filter((entry) => (entry.size || 0) <= 650000)
+                .filter((entry) => {
+                  const base = entry.path.split('/').pop().toLowerCase();
+                  const loweredPath = entry.path.toLowerCase();
+                  return (
+                    MANIFEST_FILE_NAMES.has(base) ||
+                    base.startsWith('readme') ||
+                    loweredPath.startsWith('.github/workflows/')
+                  );
+                })
+                .slice(0, 28);
+
+              const sourceCandidates = treeEntries
+                .filter((entry) => entry?.type === 'blob' && !!entry.path)
+                .filter((entry) => (entry.size || 0) <= 220000)
+                .filter((entry) => hasSourceExtension(entry.path))
+                .slice(0, 44);
+
+              const fileCandidates = [...manifestCandidates, ...sourceCandidates].slice(0, 52);
+
+              await Promise.all(
+                fileCandidates.map(async (entry) => {
+                  if (!entry?.sha || !entry?.path) return;
+                  try {
+                    const blobRes = await client.get(
+                      `/repos/${repo.owner.login}/${repo.name}/git/blobs/${entry.sha}`
+                    );
+                    const decoded = decodeGitHubFileContent(blobRes.data);
+                    if (!decoded) return;
+
+                    const baseName = entry.path.split('/').pop();
+                    const loweredPath = entry.path.toLowerCase();
+                    if (
+                      MANIFEST_FILE_NAMES.has(baseName.toLowerCase()) ||
+                      baseName.toLowerCase().startsWith('readme') ||
+                      loweredPath.startsWith('.github/workflows/')
+                    ) {
+                      scanTextParts.push(decoded.slice(0, 22000));
+                      parseManifestSignals(baseName, decoded).forEach((skill) => manifestSignals.push(skill));
+                    }
+                    if (hasSourceExtension(entry.path)) {
+                      parseSourceImportSignals(entry.path, decoded).forEach((skill) => importSignals.push(skill));
+                    }
+                  } catch (e) {
+                    // ignore blob-level failures
+                  }
+                })
+              );
+
+              setRepoScanCache(cacheKey, {
+                manifestSignals: [...new Set(manifestSignals.map((s) => canonicalSkillName(s)).filter(Boolean))],
+                importSignals: [...new Set(importSignals.map((s) => canonicalSkillName(s)).filter(Boolean))],
+                scanText: scanTextParts.join('\n').slice(0, 50000)
+              });
+            } catch (e) {
+              // tree call failed; continue with metadata-only extraction
+            }
+          }
+        }
+
+        const summary = toRepoSummary(repo, languages, commitCount);
+        summary.manifestSignals = [...new Set(manifestSignals.map((s) => canonicalSkillName(s)).filter(Boolean))];
+        summary.importSignals = [...new Set(importSignals.map((s) => canonicalSkillName(s)).filter(Boolean))];
+        summary.scanText = scanTextParts.join('\n').slice(0, 50000);
+        return summary;
       } catch (error) {
-        return toRepoSummary(repo, {}, 0);
+        const summary = toRepoSummary(repo, {}, 0);
+        summary.manifestSignals = [];
+        summary.importSignals = [];
+        summary.scanText = '';
+        return summary;
       }
     })
   );
@@ -778,8 +1293,8 @@ app.post(`${API_PREFIX}/integrations/github/oauth/sync`, authGuard, async (req, 
   }
 
   const studentName = safeString(req.body?.studentName) || req.user.name || 'Unknown Student';
-  const includePrivate = Boolean(req.body?.includePrivate);
-  const limit = Number(req.body?.limit) || 30;
+  const includePrivate = req.body?.includePrivate !== false;
+  const limit = Number(req.body?.limit) || 100;
 
   try {
     const syncPayload = await runGithubSync({ token, limit, includePrivate });
@@ -805,8 +1320,8 @@ app.post(`${API_PREFIX}/integrations/github/sync`, authGuard, async (req, res) =
   }
 
   const studentName = safeString(req.body?.studentName) || req.user.name || 'Unknown Student';
-  const includePrivate = Boolean(req.body?.includePrivate);
-  const limit = Number(req.body?.limit) || 30;
+  const includePrivate = req.body?.includePrivate !== false;
+  const limit = Number(req.body?.limit) || 100;
 
   try {
     const syncPayload = await runGithubSync({ token, limit, includePrivate });

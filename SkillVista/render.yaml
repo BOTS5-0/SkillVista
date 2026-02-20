@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: skillvista
-    runtime: node
-    buildCommand: npm install --legacy-peer-deps
-    startCommand: node backend/server.js
-    envVars:
-      - key: NODE_ENV
-        value: production
